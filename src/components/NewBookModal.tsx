@@ -282,7 +282,7 @@ export const NewBookModal: React.FC<NewBookModalProps> = ({
       title: title.trim() || originalTitle.trim() || 'کتاب جدید',
       originalTitle: originalTitle.trim() || 'Untitled Book',
       author: author.trim() || 'نامشخص',
-      translator: translator.trim() || 'سامانه هوشمند ترجمه کتاب',
+      translator: translator.trim(),
       tone,
       sourceLanguage: sourceLanguage || 'en',
       targetLanguage: targetLanguage || 'fa',

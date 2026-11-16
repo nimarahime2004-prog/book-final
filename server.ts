@@ -813,31 +813,28 @@ function restoreImages(html: string, imageMap: Map<string, string>): string {
       });
     }
 
-    // If the token was not preserved by the AI, append only if the image is not already present in the HTML
+    // If the token was not preserved by the AI, append only if the exact image is not already present in the HTML
     if (!replaced) {
-      const srcMatch = fullTag.match(/src=["']([^"']+)["']/i);
+      const srcMatch = fullTag.match(/\bsrc=["']([^"']+)["']/i);
       const src = srcMatch ? srcMatch[1] : '';
-      const srcSnippet = src.length > 50 ? src.slice(0, 50) : src;
-      const alreadyInHtml = srcSnippet && restored.includes(srcSnippet);
+      const alreadyInHtml = Boolean(src) && restored.includes(src);
       if (!alreadyInHtml) {
         restored += `\n<div class="book-illustration-wrap my-4 text-center">${fullTag}</div>\n`;
       }
     }
   }
 
-  // Final Strict Deduplication Pass: Ensure no identical image tag/src appears more than once in the translated chunk
+  // Final Deduplication Pass (exact full src comparison so distinct images sharing JPEG/PNG headers are never dropped)
   const seenImageSrcs = new Set<string>();
   restored = restored.replace(
-    /(?:<div[^>]*class="[^"]*book-illustration-wrap[^"]*"[^>]*>[\s\S]*?<img\s+[^>]*src=["']([^"']+)["'][^>]*>[\s\S]*?<\/div>|<figure[^>]*>[\s\S]*?<img\s+[^>]*src=["']([^"']+)["'][^>]*>[\s\S]*?<\/figure>|<img\s+[^>]*src=["']([^"']+)["'][^>]*>)/gi,
+    /(?:<div[^>]*class="[^"]*book-illustration-wrap[^"]*"[^>]*>[\s\S]*?<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/div>|<figure[^>]*>[\s\S]*?<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/figure>|<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>)/gi,
     (wholeMatch, src1, src2, src3) => {
       const src = src1 || src2 || src3;
       if (!src) return wholeMatch;
-      const fingerprint = src.length > 250 ? src.slice(0, 250) : src;
-      if (seenImageSrcs.has(fingerprint)) {
-        // Redundant duplicate image eliminated!
+      if (seenImageSrcs.has(src)) {
         return '';
       }
-      seenImageSrcs.add(fingerprint);
+      seenImageSrcs.add(src);
       return wholeMatch;
     }
   );
@@ -872,20 +869,19 @@ app.post('/api/translate', async (req, res) => {
   const dedicatedCachePrompt = resolvedBookId ? bookCacheManager.formatPromptContext(resolvedBookId, chapterTitle, tone) : '';
 
   // 0. Image preservation: replace heavy base64 images with lightweight tokens for the AI prompt
-  // Deduplicate identical images within the input chunk so each distinct image receives exactly one placeholder
+  // Deduplicate only exact identical images within the input chunk so each distinct image receives a placeholder
   const imagePlaceholderMap = new Map<string, string>();
   const seenInputSrcs = new Set<string>();
   let cleanEnglishText = englishText;
 
-  const imgRegex = /<img\s+[^>]*src=["'](data:[^"']+)["'][^>]*>/gi;
+  const imgRegex = /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
   let imgIndex = 0;
   cleanEnglishText = englishText.replace(imgRegex, (fullImgTag, srcData) => {
-    const fingerprint = srcData ? srcData.slice(0, 250) : fullImgTag;
-    if (seenInputSrcs.has(fingerprint)) {
-      // Skip redundant duplicate image tag in source input
+    const exactKey = srcData || fullImgTag;
+    if (seenInputSrcs.has(exactKey)) {
       return '';
     }
-    seenInputSrcs.add(fingerprint);
+    seenInputSrcs.add(exactKey);
     const placeholderToken = `[[IMAGE_PRESERVED_SLOT_${imgIndex}]]`;
     imagePlaceholderMap.set(placeholderToken, fullImgTag);
     imgIndex++;
@@ -1588,6 +1584,29 @@ app.post('/api/import/file', async (req, res) => {
     let totalImagesCount = 0;
 
     if (detectedType === 'docx') {
+      // Extract original metadata (Title & Author) from DOCX core.xml if present
+      try {
+        const docxZip = await JSZip.loadAsync(buffer);
+        const coreXml = await docxZip.file('docProps/core.xml')?.async('text');
+        if (coreXml) {
+          const dcTitle = /<dc:title[^>]*>([\s\S]*?)<\/dc:title>/i.exec(coreXml);
+          if (dcTitle && dcTitle[1]?.trim()) {
+            const cleanDocTitle = dcTitle[1].replace(/<[^>]+>/g, '').trim();
+            if (cleanDocTitle && cleanDocTitle.length > 1) {
+              originalTitle = cleanDocTitle;
+              if (!title || title === cleanBaseName) title = cleanDocTitle;
+            }
+          }
+          const dcCreator = /<dc:creator[^>]*>([\s\S]*?)<\/dc:creator>/i.exec(coreXml);
+          if (dcCreator && dcCreator[1]?.trim()) {
+            const cleanAuthor = dcCreator[1].replace(/<[^>]+>/g, '').trim();
+            if (cleanAuthor && cleanAuthor.length > 1) author = cleanAuthor;
+          }
+        }
+      } catch {
+        // Non-fatal metadata read
+      }
+
       let imageIdx = 0;
       const options = {
         convertImage: mammoth.images.imgElement((image: any) => {
@@ -1687,8 +1706,8 @@ app.post('/api/import/file', async (req, res) => {
         const width = imgObj.width;
         const height = imgObj.height;
 
-        if (width < 60 || height < 60) return null;
-        if (width / height > 22 || height / width > 22) return null;
+        if (width < 28 || height < 28 || width * height < 900) return null;
+        if (width / height > 25 || height / width > 25) return null;
 
         let channels: 1 | 3 | 4 = 3;
         if (imgObj.kind === 1) {
@@ -1786,6 +1805,23 @@ app.post('/api/import/file', async (req, res) => {
         const pdfDoc = await loadingTask.promise;
         numPages = pdfDoc.numPages;
 
+        // Extract PDF metadata (Title & Author) automatically
+        try {
+          const meta: any = await pdfDoc.getMetadata();
+          const info = meta?.info || {};
+          const metaTitle = typeof info.Title === 'string' ? info.Title.replace(/\.pdf$/i, '').trim() : '';
+          const metaAuthor = typeof info.Author === 'string' ? info.Author.trim() : '';
+          if (metaTitle && metaTitle.length > 1 && !/^microsoft word/i.test(metaTitle)) {
+            originalTitle = metaTitle;
+            if (!title || title === cleanBaseName) title = metaTitle;
+          }
+          if (metaAuthor && metaAuthor.length > 1) {
+            author = metaAuthor;
+          }
+        } catch {
+          // Non-fatal metadata read
+        }
+
         for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
           try {
             const page = await pdfDoc.getPage(pageNum);
@@ -1808,74 +1844,82 @@ app.post('/api/import/file', async (req, res) => {
             const pageText = pageLines.join('\n\n');
             const words = pageText.split(/\s+/).filter(Boolean).length;
 
-            // Extract genuine, non-white images strictly for THIS specific page
+            // Extract genuine, non-white images strictly for THIS specific page (both page.objs & page.commonObjs!)
             const thisPageImages: string[] = [];
-            const seenImageFingerprints = new Set<string>();
+            const seenPageImageSrcs = new Set<string>();
+
+            const resolvePdfImgKey = (imgKey: string): Promise<any> => {
+              return new Promise<any>((resolve) => {
+                let finished = false;
+                const finish = (val: any) => {
+                  if (!finished) {
+                    finished = true;
+                    clearTimeout(timer);
+                    resolve(val);
+                  }
+                };
+                const timer = setTimeout(() => finish(null), 3500);
+
+                try {
+                  const inCommon =
+                    imgKey.startsWith('g_') ||
+                    (page.commonObjs && typeof (page.commonObjs as any).has === 'function' && (page.commonObjs as any).has(imgKey));
+                  const inPageObjs =
+                    page.objs && typeof (page.objs as any).has === 'function' && (page.objs as any).has(imgKey);
+
+                  const primaryStore = inCommon && !inPageObjs ? page.commonObjs : page.objs || page.commonObjs;
+                  const secondaryStore = primaryStore === page.objs ? page.commonObjs : page.objs;
+
+                  if (primaryStore && typeof primaryStore.get === 'function') {
+                    primaryStore.get(imgKey, (data: any) => {
+                      if (data) return finish(data);
+                      if (secondaryStore && typeof secondaryStore.get === 'function') {
+                        try {
+                          secondaryStore.get(imgKey, (d2: any) => finish(d2));
+                        } catch {
+                          finish(null);
+                        }
+                      } else {
+                        finish(null);
+                      }
+                    });
+                  } else if (secondaryStore && typeof secondaryStore.get === 'function') {
+                    secondaryStore.get(imgKey, (d2: any) => finish(d2));
+                  } else {
+                    finish(null);
+                  }
+                } catch {
+                  finish(null);
+                }
+              });
+            };
 
             try {
               const ops = await page.getOperatorList();
               for (let i = 0; i < ops.fnArray.length; i++) {
                 const fn = ops.fnArray[i];
-                if (fn === pdfjsLib.OPS.paintImageXObject) {
+                if (
+                  fn === pdfjsLib.OPS.paintImageXObject ||
+                  fn === (pdfjsLib.OPS as any).paintImageXObjectRepeat
+                ) {
                   const imgKey = ops.argsArray[i]?.[0];
-                  if (!imgKey) continue;
+                  if (!imgKey || typeof imgKey !== 'string') continue;
 
-                  const rawImgObj = await new Promise<any>((resolve) => {
-                    let finished = false;
-                    const timer = setTimeout(() => {
-                      if (!finished) {
-                        finished = true;
-                        resolve(null);
-                      }
-                    }, 3500);
-
-                    try {
-                      if (page.objs && typeof page.objs.get === 'function') {
-                        page.objs.get(imgKey, (data: any) => {
-                          if (!finished) {
-                            finished = true;
-                            clearTimeout(timer);
-                            resolve(data);
-                          }
-                        });
-                      } else if (page.commonObjs && typeof page.commonObjs.get === 'function') {
-                        page.commonObjs.get(imgKey, (data: any) => {
-                          if (!finished) {
-                            finished = true;
-                            clearTimeout(timer);
-                            resolve(data);
-                          }
-                        });
-                      } else {
-                        clearTimeout(timer);
-                        resolve(null);
-                      }
-                    } catch {
-                      clearTimeout(timer);
-                      resolve(null);
-                    }
-                  });
-
+                  const rawImgObj = await resolvePdfImgKey(imgKey);
                   if (rawImgObj) {
                     const dataUrl = await processRawPdfImage(rawImgObj);
-                    if (dataUrl) {
-                      const fp = dataUrl.slice(0, 200) + dataUrl.length;
-                      if (!seenImageFingerprints.has(fp)) {
-                        seenImageFingerprints.add(fp);
-                        thisPageImages.push(dataUrl);
-                      }
+                    if (dataUrl && !seenPageImageSrcs.has(dataUrl)) {
+                      seenPageImageSrcs.add(dataUrl);
+                      thisPageImages.push(dataUrl);
                     }
                   }
                 } else if (fn === pdfjsLib.OPS.paintInlineImageXObject) {
                   const inlineObj = ops.argsArray[i]?.[0];
                   if (inlineObj) {
                     const dataUrl = await processRawPdfImage(inlineObj);
-                    if (dataUrl) {
-                      const fp = dataUrl.slice(0, 200) + dataUrl.length;
-                      if (!seenImageFingerprints.has(fp)) {
-                        seenImageFingerprints.add(fp);
-                        thisPageImages.push(dataUrl);
-                      }
+                    if (dataUrl && !seenPageImageSrcs.has(dataUrl)) {
+                      seenPageImageSrcs.add(dataUrl);
+                      thisPageImages.push(dataUrl);
                     }
                   }
                 }
@@ -2062,13 +2106,22 @@ app.post('/api/import/file', async (req, res) => {
         let modHtml = xhtml;
         for (const [p, dUrl] of imageMap.entries()) {
           const fn = p.split('/').pop() || '';
+          if (!fn) continue;
+          const escapedFn = fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           modHtml = modHtml.replace(
-            new RegExp(`src=["'][^"']*${fn}["']`, 'gi'),
+            new RegExp(`src=["'][^"']*${escapedFn}["']`, 'gi'),
             `src="${dUrl}" class="book-embedded-image rounded-xl shadow-md my-4 max-w-full mx-auto block border border-slate-300"`
+          );
+          modHtml = modHtml.replace(
+            new RegExp(`<image\\b[^>]*(?:xlink:href|href)=["'][^"']*${escapedFn}["'][^>]*\\/?>`, 'gi'),
+            `<img src="${dUrl}" class="book-embedded-image rounded-xl shadow-md my-4 max-w-full mx-auto block border border-slate-300" alt="تصویر کتاب" />`
           );
         }
 
-        const blocks = modHtml.match(/<(?:p|h[1-3]|blockquote|figure)[^>]*>[\s\S]*?<\/(?:p|h[1-3]|blockquote|figure)>/gi) || [modHtml];
+        const blocks =
+          modHtml.match(
+            /<(?:p|h[1-3]|blockquote|figure|li)[^>]*>[\s\S]*?<\/(?:p|h[1-3]|blockquote|figure|li)>|<div[^>]*>[^<]*<img\b[^>]*>[^<]*<\/div>|<img\b[^>]*>/gi
+          ) || [modHtml];
         let curChunkHtml: string[] = [];
         let curWordCount = 0;
         let subChunk = 1;

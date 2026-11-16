@@ -239,7 +239,7 @@ export function AdminBookEditorModal({
       title: title || 'کتاب ترجمه شده',
       originalTitle: originalTitle || '',
       author: author || '',
-      translator: translator || 'مدیریت سامانه',
+      translator: translator || '',
       completedChunks: chunks.filter((c) => Boolean(c.translatedHtml && c.translatedHtml.trim())).length,
       hasAdminCopy: hasExistingCopy,
       chunks: chunks.map((c) => ({
@@ -262,10 +262,10 @@ export function AdminBookEditorModal({
         textAlignment: 'right' as const,
         fontFamily: 'Vazirmatn Medium',
         themeId: 'spiritual' as any,
-        showHeader: true,
-        showFooter: true,
-        headerText: title || 'کتاب ترجمه شده',
-        footerText: 'نسخه رسمی ویرایش مدیریت',
+        showHeader: book?.designConfig?.showHeader ?? false,
+        showFooter: book?.designConfig?.showFooter ?? false,
+        headerText: book?.designConfig?.headerText || '',
+        footerText: book?.designConfig?.footerText || '',
       },
     };
 
@@ -320,7 +320,7 @@ export function AdminBookEditorModal({
       <html dir="rtl" lang="fa">
       <head>
         <meta charset="utf-8">
-        <title>${title} - نسخه اختصاصی مدیریت</title>
+        <title>${title}</title>
         <style>
           @page { size: A4; margin: 2cm; }
           * { box-sizing: border-box; }
@@ -363,7 +363,6 @@ export function AdminBookEditorModal({
           ${originalTitle ? `<div class="meta" dir="ltr">${originalTitle}</div>` : ''}
           ${author ? `<div class="meta">نویسنده: ${author}</div>` : ''}
           ${translator ? `<div class="meta">مترجم و ویراستار: ${translator}</div>` : ''}
-          <div class="badge">نسخه اختصاصی ویرایش مدیریت سامانه</div>
         </div>
         ${chaptersHtml}
       </body>

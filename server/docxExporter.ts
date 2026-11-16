@@ -96,6 +96,25 @@ function stripBookUrls(html: string): string {
     .trim();
 }
 
+function recoverMissingChunkImages(englishText: string | undefined, translatedHtml: string): string {
+  if (!translatedHtml || !englishText || !englishText.includes('<img')) return translatedHtml;
+  const imgMatches = englishText.match(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi);
+  if (!imgMatches || imgMatches.length === 0) return translatedHtml;
+
+  let updated = translatedHtml;
+  const seenRecovered = new Set<string>();
+  for (const imgTag of imgMatches) {
+    const srcMatch = imgTag.match(/\bsrc=["']([^"']+)["']/i);
+    const src = srcMatch ? srcMatch[1] : '';
+    if (!src || seenRecovered.has(src)) continue;
+    seenRecovered.add(src);
+    if (!updated.includes(src)) {
+      updated += `\n<div class="book-illustration-wrap my-4 text-center">${imgTag}</div>\n`;
+    }
+  }
+  return updated;
+}
+
 function sanitizeChunkHtml(html: string, seenImgSrcs: Set<string>): string {
   if (!html || typeof html !== 'string') return '';
 
@@ -115,11 +134,11 @@ function sanitizeChunkHtml(html: string, seenImgSrcs: Set<string>): string {
     .trim();
 
   if (sanitized.includes('<img')) {
-    sanitized = sanitized.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (match, src) => {
+    sanitized = sanitized.replace(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi, (match, src) => {
       if (!src) return '';
-      const fp = src.length > 250 ? src.slice(0, 250) : src;
-      if (seenImgSrcs.has(fp)) return '';
-      seenImgSrcs.add(fp);
+      // Full src comparison: never truncate to 250 chars (JPEG headers collide!)
+      if (seenImgSrcs.has(src)) return '';
+      seenImgSrcs.add(src);
       return match;
     });
     sanitized = sanitized
@@ -201,12 +220,9 @@ async function normalizeImageBufferForDocx(dataUrl: string): Promise<{ buffer: B
     if (isJpg) return { buffer: imgBuffer, type: 'jpg' };
     if (isGif) return { buffer: imgBuffer, type: 'gif' };
 
-    // Convert WebP/AVIF/SVG/unknown image buffers to PNG via sharp so Word always opens cleanly
-    if (header.includes('image/')) {
-      const converted = await sharp(imgBuffer).png().toBuffer();
-      return { buffer: converted, type: 'png' };
-    }
-    return null;
+    // Convert WebP/AVIF/SVG/TIFF/octet-stream image buffers to PNG via sharp so Word always opens cleanly
+    const converted = await sharp(imgBuffer).png().toBuffer();
+    return { buffer: converted, type: 'png' };
   } catch {
     return null;
   }
@@ -225,9 +241,9 @@ function extractHtmlBlocks(html: string): ParsedHtmlBlock[] {
   const blocks: ParsedHtmlBlock[] = [];
   if (!html || !html.trim()) return blocks;
 
-  // Match fleuron dividers, footnotes, callouts (inner <p> or leaf blocks), headings, paragraphs, blockquotes, list items, figcaptions, and images
+  // Match fleuron dividers, footnotes, headings, paragraphs, blockquotes, list items, figcaptions, and images
   const tokenRegex =
-    /<div[^>]*class=["'][^"']*book-fleuron-divider[^"']*["'][^>]*>([\s\S]*?)<\/div>|<div[^>]*class=["'][^"']*book-footnote[^"']*["'][^>]*>([\s\S]*?)<\/div>|<(h[1-3]|p|blockquote|li|figcaption)[^>]*>([\s\S]*?)<\/\3>|<img\s+[^>]*src=["'](data:image\/[^"']+)["'][^>]*>/gi;
+    /<div[^>]*class=["'][^"']*book-fleuron-divider[^"']*["'][^>]*>([\s\S]*?)<\/div>|<div[^>]*class=["'][^"']*book-footnote[^"']*["'][^>]*>([\s\S]*?)<\/div>|<(h[1-3]|p|blockquote|li|figcaption)[^>]*>([\s\S]*?)<\/\3>|<img\b[^>]*\bsrc=["'](data:[^"']+)["'][^>]*>/gi;
 
   let match: RegExpExecArray | null;
   while ((match = tokenRegex.exec(html)) !== null) {
@@ -239,8 +255,8 @@ function extractHtmlBlocks(html: string): ParsedHtmlBlock[] {
       const tag = match[3].toLowerCase();
       const inner = match[4] || '';
 
-      // Extract any embedded images inside this block first
-      const imgRegex = /<img\s+[^>]*src=["'](data:image\/[^"']+)["'][^>]*>/gi;
+      // Extract any embedded images inside this block
+      const imgRegex = /<img\b[^>]*\bsrc=["'](data:[^"']+)["'][^>]*>/gi;
       let imgMatch: RegExpExecArray | null;
       while ((imgMatch = imgRegex.exec(inner)) !== null) {
         blocks.push({ kind: 'img', imageDataUrl: imgMatch[1] });
@@ -302,7 +318,7 @@ export async function handleExportDocxRequest(req: express.Request, res: express
         const sourceData = useAdminCopy && serverBook.adminCopy ? serverBook.adminCopy : serverBook;
         rawTitle = rawTitle || sourceData.title || serverBook.title || 'کتاب ترجمه شده';
         rawAuthor = rawAuthor || sourceData.author || serverBook.author || '';
-        rawTranslator = rawTranslator || sourceData.translator || serverBook.translator || 'سامانه هوشمند ترجمه کتاب';
+        rawTranslator = rawTranslator || sourceData.translator || serverBook.translator || '';
         rawOriginalTitle = rawOriginalTitle || sourceData.originalTitle || serverBook.originalTitle || '';
 
         incomingDesignConfig = {
@@ -335,13 +351,13 @@ export async function handleExportDocxRequest(req: express.Request, res: express
 
         const pageChunkCount = validChunks.filter(c => /^(صفحه|page)\s*\d+/i.test((c.chapterTitle || '').trim())).length;
         const isPageBased = pageChunkCount >= Math.min(2, validChunks.length);
-        const seenImgs = new Set<string>();
 
         let currentGroup: { key: string; title: string; chunkHtmls: string[] } | null = null;
         for (const chunk of validChunks) {
           const cleanedTitle = cleanChapterTitle(chunk.chapterTitle || 'فصل کتاب');
           const rawHtml = chunk.translatedHtml || (chunk.translatedText ? `<p>${chunk.translatedText}</p>` : '');
-          const sanitized = sanitizeChunkHtml(rawHtml, seenImgs);
+          const recoveredHtml = recoverMissingChunkImages(chunk.englishText, rawHtml);
+          const sanitized = sanitizeChunkHtml(recoveredHtml, new Set<string>());
           if (!sanitized) continue;
 
           const isThisChunkPage = /^(صفحه|page)\s*\d+/i.test(cleanedTitle);
@@ -366,10 +382,9 @@ export async function handleExportDocxRequest(req: express.Request, res: express
 
     // 2. Fallback to inline chapters/chunks sent directly in request body (e.g., samples or unsaved admin edits)
     if (chapterSources.length === 0 && Array.isArray(body.chapters) && body.chapters.length > 0) {
-      const seenImgs = new Set<string>();
       for (const ch of body.chapters) {
         if (!ch) continue;
-        const html = sanitizeChunkHtml(String(ch.htmlContent || ''), seenImgs);
+        const html = sanitizeChunkHtml(String(ch.htmlContent || ''), new Set<string>());
         if (html) {
           chapterSources.push({
             title: cleanChapterTitle(ch.title || ''),
@@ -416,6 +431,7 @@ export async function handleExportDocxRequest(req: express.Request, res: express
     const textColor = normalizeHex(customColors.textColor || activeTheme.textColor, '2D3748');
     const accentColor = normalizeHex(customColors.accentColor || activeTheme.accentColor, 'B45309');
     const pageBgColor = normalizeHex(customColors.pageBgColor || activeTheme.pageBgColor, 'FBF6EA');
+    const headerFooterBorderColor = normalizeHex(customColors.borderColor || activeTheme.borderColor, 'CBD5E1');
 
     const pSpacingAfter =
       design.paragraphSpacing === 'generous'
@@ -428,10 +444,14 @@ export async function handleExportDocxRequest(req: express.Request, res: express
     const pSpacingBefore = design.paragraphSpacing === 'generous' ? 120 : 60;
     const pLineSpacing = design.lineSpacing === 'relaxed' ? 440 : design.lineSpacing === 'compact' ? 340 : 380;
 
-    const showHeader = design.showHeader === true && Boolean(design.headerText?.trim());
-    const headerText = showHeader ? (design.headerText?.trim() || '') : '';
-    const showFooter = design.showFooter === true && Boolean(design.footerText?.trim());
-    const footerText = showFooter ? (design.footerText?.trim() || '') : '';
+    // Never inject unsolicited domain names or branding when user left header/footer empty
+    const headerParts = [design.headerText?.trim(), design.websiteUrl?.trim()].filter(Boolean) as string[];
+    const showHeader = design.showHeader === true && headerParts.length > 0;
+    const headerText = showHeader ? headerParts.join(' • ') : '';
+
+    const footerParts = [design.footerText?.trim(), design.brandName?.trim()].filter(Boolean) as string[];
+    const showFooter = design.showFooter === true && footerParts.length > 0;
+    const footerText = showFooter ? footerParts.join(' • ') : '';
     const showPageNumbers = design.showPageNumbers !== false;
 
     const h1DocxSize = Math.round((design.heading1Size || 22) * 2);
@@ -510,20 +530,32 @@ export async function handleExportDocxRequest(req: express.Request, res: express
     const docChildren: any[] = [];
     const cleanTitle = rawTitle || 'کتاب ترجمه شده';
 
-    // Cover / Title Page (if enabled)
+    // Cover / Title Page (if enabled) — auto-include Persian Title, English/Original Title, and Author
     if (design.showCoverPage !== false) {
       const cover = design.coverPage || {};
       const coverTitle = cover.title?.trim() || cleanTitle;
       const coverTitleSize = Math.round((cover.titleSize || 28) * 2);
       const coverTitleColor = normalizeHex(cover.titleColor, h1Color);
-      const coverSubtitle = (cover.subtitle !== undefined ? cover.subtitle : rawOriginalTitle)?.trim() || '';
+      const cleanOrigTitle =
+        rawOriginalTitle &&
+        rawOriginalTitle !== coverTitle &&
+        rawOriginalTitle !== 'Untitled Book' &&
+        rawOriginalTitle !== 'New Book'
+          ? rawOriginalTitle
+          : '';
+      const coverSubtitle = cover.subtitle?.trim() || cleanOrigTitle;
       const coverSubtitleSize = Math.round((cover.subtitleSize || 14) * 2);
       const coverSubtitleColor = normalizeHex(cover.subtitleColor, '64748B');
-      const coverAuthor = (cover.author !== undefined ? cover.author : rawAuthor)?.trim() || '';
+      const cleanAuthor = rawAuthor && rawAuthor !== 'نامشخص' ? rawAuthor : rawAuthor;
+      const coverAuthor = cover.author?.trim() || cleanAuthor || '';
       const coverAuthorSize = Math.round((cover.authorSize || 14) * 2);
       const coverAuthorColor = normalizeHex(cover.authorColor, '4A5568');
-      const coverTranslator = (cover.translator !== undefined ? cover.translator : rawTranslator)?.trim() || '';
-      const coverPublisher = (cover.publisher !== undefined ? cover.publisher : design.brandName)?.trim() || '';
+      const rawCleanTranslator =
+        rawTranslator && rawTranslator !== 'سامانه هوشمند ترجمه کتاب' && rawTranslator !== 'سامانه ترجمه'
+          ? rawTranslator
+          : '';
+      const coverTranslator = cover.translator?.trim() || rawCleanTranslator || '';
+      const coverPublisher = cover.publisher?.trim() || design.brandName?.trim() || '';
       const coverNote = (cover.note || cover.editionYear || '').trim();
       const coverShowMotif = cover.showMotif !== false;
       const coverShowDivider = cover.showDivider !== false;
@@ -567,18 +599,19 @@ export async function handleExportDocxRequest(req: express.Request, res: express
       );
 
       if (coverSubtitle) {
+        const isLatinSubtitle = /[A-Za-z]/.test(coverSubtitle) && !/[\u0600-\u06FF]/.test(coverSubtitle);
         docChildren.push(
           new Paragraph({
             alignment: coverAlign,
             spacing: { after: 300 },
-            bidirectional: true,
+            bidirectional: !isLatinSubtitle,
             children: [
               new TextRun({
                 text: coverSubtitle,
                 font: fontDef,
                 size: coverSubtitleSize,
                 color: coverSubtitleColor,
-                rightToLeft: true,
+                rightToLeft: !isLatinSubtitle,
               }),
             ],
           })
@@ -926,6 +959,7 @@ export async function handleExportDocxRequest(req: express.Request, res: express
       sections: [
         {
           properties: {
+            titlePage: design.showCoverPage !== false,
             page: {
               margin: {
                 top: marginTwips,
@@ -943,6 +977,15 @@ export async function handleExportDocxRequest(req: express.Request, res: express
                       new Paragraph({
                         alignment: AlignmentType.CENTER,
                         bidirectional: true,
+                        spacing: { after: 120 },
+                        border: {
+                          bottom: {
+                            color: headerFooterBorderColor,
+                            space: 4,
+                            style: BorderStyle.SINGLE,
+                            size: 6,
+                          },
+                        },
                         children: [
                           new TextRun({
                             text: headerText,
@@ -958,13 +1001,22 @@ export async function handleExportDocxRequest(req: express.Request, res: express
                 }
               : undefined,
           footers:
-            showFooter || showPageNumbers
+            (showFooter && footerText) || showPageNumbers
               ? {
                   default: new Footer({
                     children: [
                       new Paragraph({
                         alignment: AlignmentType.CENTER,
                         bidirectional: true,
+                        spacing: { before: 120 },
+                        border: {
+                          top: {
+                            color: headerFooterBorderColor,
+                            space: 4,
+                            style: BorderStyle.SINGLE,
+                            size: 6,
+                          },
+                        },
                         children: [
                           ...(footerText
                             ? [

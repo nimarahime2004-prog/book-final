@@ -60,51 +60,73 @@ function parseChapterHtml(
       chapterTitle = heading.textContent.trim().replace(/\s+/g, ' ');
     }
 
-    // 2. Resolve image src attributes to base64 data URLs
+    // 2. Resolve image src attributes (img src + svg image xlink:href / href) to base64 data URLs
     const images = doc.querySelectorAll('img, image');
     images.forEach(img => {
-      const rawSrc = img.getAttribute('src') || img.getAttribute('xlink:href') || '';
+      const rawSrc = img.getAttribute('src') || img.getAttribute('xlink:href') || img.getAttribute('href') || '';
       if (!rawSrc) return;
 
       const resolvedPath = resolveZipPath(chapterDir, rawSrc);
-      const dataUrl = imageMap.get(resolvedPath) || imageMap.get(rawSrc.split('/').pop() || '');
+      const dataUrl = imageMap.get(resolvedPath) || imageMap.get(decodeURIComponent(rawSrc.split('/').pop() || '')) || imageMap.get(rawSrc.split('/').pop() || '');
 
       if (dataUrl) {
-        img.setAttribute('src', dataUrl);
-        img.setAttribute(
-          'class',
-          'book-embedded-image rounded-xl shadow-md my-4 max-w-full mx-auto block border border-slate-300'
-        );
-        img.removeAttribute('xlink:href');
+        if (img.tagName.toLowerCase() === 'image' && doc && img.parentNode) {
+          const htmlImg = doc.createElement('img');
+          htmlImg.setAttribute('src', dataUrl);
+          htmlImg.setAttribute(
+            'class',
+            'book-embedded-image rounded-xl shadow-md my-4 max-w-full mx-auto block border border-slate-300'
+          );
+          htmlImg.setAttribute('alt', 'تصویر کتاب');
+          img.parentNode.replaceChild(htmlImg, img);
+        } else {
+          img.setAttribute('src', dataUrl);
+          img.setAttribute(
+            'class',
+            'book-embedded-image rounded-xl shadow-md my-4 max-w-full mx-auto block border border-slate-300'
+          );
+          img.removeAttribute('xlink:href');
+        }
       }
     });
 
-    // 3. Extract semantic blocks (headings, paragraphs, blockquotes, images)
-    const blocks = doc.querySelectorAll('h1, h2, h3, h4, p, blockquote, div.image, figure');
+    // 3. Extract semantic blocks (headings, paragraphs, blockquotes, images including standalone imgs)
+    const blocks = doc.querySelectorAll('h1, h2, h3, h4, p, blockquote, div.image, figure, img');
     const processedImgElements = new Set<Element>();
-    const processedSrcFingerprints = new Set<string>();
+    const processedSrcs = new Set<string>();
 
     if (blocks.length > 0) {
       blocks.forEach(block => {
-        // If block has an img inside or is an image
-        const imgEl = block.tagName.toLowerCase() === 'img' ? block : block.querySelector('img');
-        if (imgEl && !processedImgElements.has(imgEl)) {
+        const tag = block.tagName.toLowerCase();
+        if (tag === 'img') {
+          if (processedImgElements.has(block)) return;
+          processedImgElements.add(block);
+          const src = block.getAttribute('src');
+          if (src && src.startsWith('data:image') && !processedSrcs.has(src)) {
+            processedSrcs.add(src);
+            htmlBlocks.push(
+              `<div class="book-illustration-wrap my-4 text-center"><img src="${src}" class="book-embedded-image rounded-xl shadow-md my-3 max-w-full mx-auto block border border-slate-300" alt="تصویر کتاب" /></div>`
+            );
+          }
+          return;
+        }
+
+        // Extract any images embedded inside this block
+        const nestedImgs = block.querySelectorAll('img');
+        nestedImgs.forEach(imgEl => {
+          if (processedImgElements.has(imgEl)) return;
           processedImgElements.add(imgEl);
           const src = imgEl.getAttribute('src');
-          if (src && src.startsWith('data:image')) {
-            const fingerprint = src.slice(0, 250);
-            if (!processedSrcFingerprints.has(fingerprint)) {
-              processedSrcFingerprints.add(fingerprint);
-              htmlBlocks.push(
-                `<div class="book-illustration-wrap my-4 text-center"><img src="${src}" class="book-embedded-image rounded-xl shadow-md my-3 max-w-full mx-auto block border border-slate-300" alt="تصویر کتاب" /></div>`
-              );
-            }
+          if (src && src.startsWith('data:image') && !processedSrcs.has(src)) {
+            processedSrcs.add(src);
+            htmlBlocks.push(
+              `<div class="book-illustration-wrap my-4 text-center"><img src="${src}" class="book-embedded-image rounded-xl shadow-md my-3 max-w-full mx-auto block border border-slate-300" alt="تصویر کتاب" /></div>`
+            );
           }
-        }
+        });
 
         const text = block.textContent?.trim() || '';
         if (text) {
-          const tag = block.tagName.toLowerCase();
           if (['h1', 'h2', 'h3'].includes(tag)) {
             htmlBlocks.push(`<${tag}>${text}</${tag}>`);
           } else if (tag === 'blockquote') {
@@ -128,18 +150,25 @@ function parseChapterHtml(
       chapterTitle = titleMatch[1].replace(/<[^>]+>/g, '').trim();
     }
 
-    // Replace images with resolved data URLs
+    // Replace images (both img src and svg image xlink:href/href) with resolved data URLs
     let modifiedHtml = xhtmlString;
     for (const [imgPath, dataUrl] of imageMap.entries()) {
       const fileName = imgPath.split('/').pop() || '';
-      const regex = new RegExp(`src=["'][^"']*${fileName}["']`, 'gi');
+      if (!fileName) continue;
+      const escapedFn = fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const srcRegex = new RegExp(`src=["'][^"']*${escapedFn}["']`, 'gi');
       modifiedHtml = modifiedHtml.replace(
-        regex,
+        srcRegex,
         `src="${dataUrl}" class="book-embedded-image rounded-xl shadow-md my-4 max-w-full mx-auto block border border-slate-300"`
+      );
+      const svgImgRegex = new RegExp(`<image\\b[^>]*(?:xlink:href|href)=["'][^"']*${escapedFn}["'][^>]*\\/?>`, 'gi');
+      modifiedHtml = modifiedHtml.replace(
+        svgImgRegex,
+        `<img src="${dataUrl}" class="book-embedded-image rounded-xl shadow-md my-4 max-w-full mx-auto block border border-slate-300" alt="تصویر کتاب" />`
       );
     }
 
-    const pMatches = modifiedHtml.match(/<(?:p|h[1-3]|blockquote)[^>]*>[\s\S]*?<\/(?:p|h[1-3]|blockquote)>/gi);
+    const pMatches = modifiedHtml.match(/<(?:p|h[1-3]|blockquote|figure)[^>]*>[\s\S]*?<\/(?:p|h[1-3]|blockquote|figure)>|<img\b[^>]*>/gi);
     if (pMatches) {
       htmlBlocks.push(...pMatches);
     } else {

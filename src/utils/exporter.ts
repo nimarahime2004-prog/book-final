@@ -231,16 +231,15 @@ export function sanitizeTranslatedHtml(html: string, sharedSeenImgSrcs?: Set<str
       .replace(/(?:<p[^>]*>)?\s*(?:Please provide the text|If you provide the text|Waiting for the text)[^<]{0,300}(?:<\/p>)?/gi, '')
       .trim();
 
-    // Fast & safe non-backtracking image deduplication
+    // Fast & safe deduplication (exact full src comparison so distinct images sharing headers are never dropped)
     if (sanitized.includes('<img')) {
       const seenSrcs = sharedSeenImgSrcs || new Set<string>();
-      sanitized = sanitized.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (match, src) => {
+      sanitized = sanitized.replace(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi, (match, src) => {
         if (!src) return match;
-        const fingerprint = src.length > 250 ? src.slice(0, 250) : src;
-        if (seenSrcs.has(fingerprint)) {
+        if (seenSrcs.has(src)) {
           return '';
         }
-        seenSrcs.add(fingerprint);
+        seenSrcs.add(src);
         return match;
       });
       // Clean up empty figure or wrapper divs leftover after image removal
@@ -453,6 +452,29 @@ export function plainTextToHtml(plainText: string, originalHtml?: string): strin
   return htmlParts.join('\n');
 }
 
+/**
+ * Retroactively recovers any <img> tags that existed in chunk.englishText
+ * if they were dropped during AI translation, ensuring all original images transfer cleanly.
+ */
+export function recoverMissingChunkImages(englishText: string | undefined, translatedHtml: string): string {
+  if (!translatedHtml || !englishText || !englishText.includes('<img')) return translatedHtml;
+  const imgMatches = englishText.match(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi);
+  if (!imgMatches || imgMatches.length === 0) return translatedHtml;
+
+  let updated = translatedHtml;
+  const seenRecovered = new Set<string>();
+  for (const imgTag of imgMatches) {
+    const srcMatch = imgTag.match(/\bsrc=["']([^"']+)["']/i);
+    const src = srcMatch ? srcMatch[1] : '';
+    if (!src || seenRecovered.has(src)) continue;
+    seenRecovered.add(src);
+    if (!updated.includes(src)) {
+      updated += `\n<div class="book-illustration-wrap my-4 text-center">${imgTag}</div>\n`;
+    }
+  }
+  return updated;
+}
+
 export interface GroupedChapter {
   chapterKey: string;
   title: string;
@@ -491,14 +513,14 @@ export function groupChunksIntoChapters(
   const isPageBased = pageChunkCount >= Math.min(2, validChunks.length);
 
   const chapters: GroupedChapter[] = [];
-  const seenImgSrcs = new Set<string>();
   let currentChapter: GroupedChapter | null = null;
 
   for (let i = 0; i < validChunks.length; i++) {
     const chunk = validChunks[i];
     const rawTitle = chunk.chapterTitle || 'فصل کتاب';
     const cleanedTitle = cleanChapterTitle(rawTitle);
-    const sanitizedChunkHtml = sanitizeTranslatedHtml(chunk.translatedHtml || '', seenImgSrcs);
+    const recoveredHtml = recoverMissingChunkImages(chunk.englishText, chunk.translatedHtml || '');
+    const sanitizedChunkHtml = sanitizeTranslatedHtml(recoveredHtml, new Set<string>());
     if (!sanitizedChunkHtml) continue;
 
     const isThisChunkPage = /^(صفحه|page)\s*\d+/i.test(cleanedTitle);
@@ -561,7 +583,6 @@ export async function prepareChaptersForPrintAsync(
   const isPageBased = pageChunkCount >= Math.min(2, validChunks.length);
 
   const chapters: GroupedChapter[] = [];
-  const seenImgSrcs = new Set<string>();
   let currentChapter: GroupedChapter | null = null;
 
   for (let i = 0; i < validChunks.length; i++) {
@@ -573,7 +594,8 @@ export async function prepareChaptersForPrintAsync(
     const chunk = validChunks[i];
     const rawTitle = chunk.chapterTitle || 'فصل کتاب';
     const cleanedTitle = cleanChapterTitle(rawTitle);
-    const sanitizedChunkHtml = sanitizeTranslatedHtml(chunk.translatedHtml || '', seenImgSrcs);
+    const recoveredHtml = recoverMissingChunkImages(chunk.englishText, chunk.translatedHtml || '');
+    const sanitizedChunkHtml = sanitizeTranslatedHtml(recoveredHtml, new Set<string>());
     if (!sanitizedChunkHtml) continue;
 
     const isThisChunkPage = /^(صفحه|page)\s*\d+/i.test(cleanedTitle);
@@ -755,6 +777,7 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
   const footerColor = (customColors.footerColor || '718096').replace('#', '').toUpperCase();
   const textColor = (customColors.textColor || activeTheme.textColor || '2D3748').replace('#', '').toUpperCase();
   const pageBgColor = (customColors.pageBgColor || activeTheme.pageBgColor || 'FBF6EA').replace('#', '').toUpperCase();
+  const headerFooterBorderColor = (customColors.borderColor || activeTheme.borderColor || 'CBD5E1').replace('#', '').toUpperCase();
 
   const pSpacingAfter =
     design.paragraphSpacing === 'generous'
@@ -767,26 +790,39 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
   const pSpacingBefore = design.paragraphSpacing === 'generous' ? 120 : 60;
   const pLineSpacing = design.lineSpacing === 'relaxed' ? 440 : design.lineSpacing === 'compact' ? 340 : 380;
 
-  const showHeader = design.showHeader === true && Boolean(design.headerText?.trim());
-  const headerText = showHeader ? (design.headerText?.trim() || '') : '';
+  // Strictly respect empty header/footer — never inject unsolicited domain names or branding
+  const headerParts = [design.headerText?.trim(), design.websiteUrl?.trim()].filter(Boolean) as string[];
+  const showHeader = design.showHeader === true && headerParts.length > 0;
+  const headerText = showHeader ? headerParts.join(' • ') : '';
 
-  const showFooter = design.showFooter === true && Boolean(design.footerText?.trim());
-  const footerText = showFooter ? (design.footerText?.trim() || '') : '';
+  const footerParts = [design.footerText?.trim(), design.brandName?.trim()].filter(Boolean) as string[];
+  const showFooter = design.showFooter === true && footerParts.length > 0;
+  const footerText = showFooter ? footerParts.join(' • ') : '';
   const showPageNumbers = design.showPageNumbers !== false;
 
   const docChildren: ParagraphType[] = [];
 
-  // Title Page (Cover / First Page)
+  // Title Page (Cover / First Page) — auto-include Persian Title, English/Original Title, and Author
   const cover = design.coverPage;
-  const coverTitle = cover?.title?.trim() || project.title || project.originalTitle || 'کتاب ترجمه شده';
+  const coverTitle = cover?.title?.trim() || project.title?.trim() || project.originalTitle?.trim() || 'کتاب ترجمه شده';
   const coverTitleSize = Math.round((cover?.titleSize || 28) * 2);
   const coverTitleColor = cover?.titleColor ? cover.titleColor.replace(/^#/, '') : h1Color;
-  const coverSubtitle = cover?.subtitle?.trim() || '';
+  const rawOrigTitle = project.originalTitle?.trim() || '';
+  const cleanOrigTitle =
+    rawOrigTitle && rawOrigTitle !== coverTitle && rawOrigTitle !== 'Untitled Book' && rawOrigTitle !== 'New Book'
+      ? rawOrigTitle
+      : '';
+  const coverSubtitle = cover?.subtitle?.trim() || cleanOrigTitle;
   const coverSubtitleSize = Math.round((cover?.subtitleSize || 14) * 2);
-  const coverAuthor = cover?.author?.trim() || project.author || '';
+  const coverAuthor = cover?.author?.trim() || project.author?.trim() || '';
   const coverAuthorSize = Math.round((cover?.authorSize || 14) * 2);
-  const coverTranslator = cover?.translator?.trim() || project.translator || '';
-  const coverPublisher = cover?.publisher?.trim() || '';
+  const rawTranslator = project.translator?.trim() || '';
+  const cleanTranslator =
+    rawTranslator && rawTranslator !== 'سامانه هوشمند ترجمه کتاب' && rawTranslator !== 'سامانه ترجمه'
+      ? rawTranslator
+      : '';
+  const coverTranslator = cover?.translator?.trim() || cleanTranslator;
+  const coverPublisher = cover?.publisher?.trim() || design.brandName?.trim() || '';
   const coverNote = cover?.note?.trim() || '';
   const coverShowMotif = cover?.showMotif !== false;
   const coverShowDivider = cover?.showDivider !== false;
@@ -830,18 +866,19 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
   );
 
   if (coverSubtitle) {
+    const isLatinSubtitle = /[A-Za-z]/.test(coverSubtitle) && !/[\u0600-\u06FF]/.test(coverSubtitle);
     docChildren.push(
       new Paragraph({
         alignment: coverAlign,
         spacing: { after: 300 },
-        bidirectional: true,
+        bidirectional: !isLatinSubtitle,
         children: [
           new TextRun({
             text: coverSubtitle,
             font: fontDef,
             size: coverSubtitleSize,
             color: '64748B',
-            rightToLeft: true,
+            rightToLeft: !isLatinSubtitle,
           }),
         ],
       })
@@ -987,7 +1024,7 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
     }
 
     const html = ch.htmlContent || '';
-    const blockRegex = /<(h[1-3]|p|blockquote|div|figure)[^>]*>([\s\S]*?)<\/\1>|<img\s+[^>]*src=["'](data:image\/[^"']+)["'][^>]*>/gi;
+    const blockRegex = /<(h[1-3]|p|blockquote|div|figure)[^>]*>([\s\S]*?)<\/\1>|<img\b[^>]*\bsrc=["'](data:[^"']+)["'][^>]*>/gi;
     let match;
     let foundAny = false;
 
@@ -1003,6 +1040,7 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
             const base64Data = dataUrl.slice(commaIdx + 1).replace(/\s+/g, '');
             const imgBuffer = base64ToUint8Array(base64Data);
             const isJpg = dataUrl.includes('image/jpeg') || dataUrl.includes('image/jpg');
+            const isGif = dataUrl.includes('image/gif');
             docChildren.push(
               new Paragraph({
                 alignment: AlignmentType.CENTER,
@@ -1014,7 +1052,7 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
                       width: 440,
                       height: 280,
                     },
-                    type: isJpg ? 'jpg' : 'png',
+                    type: isJpg ? 'jpg' : isGif ? 'gif' : 'png',
                   } as any),
                 ],
               })
@@ -1030,7 +1068,7 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
       const innerHtml = match[2];
 
       // Embedded image within block
-      const embeddedImgRegex = /<img\s+[^>]*src=["'](data:image\/[^"']+)["'][^>]*>/gi;
+      const embeddedImgRegex = /<img\b[^>]*\bsrc=["'](data:[^"']+)["'][^>]*>/gi;
       let imgMatch;
       while ((imgMatch = embeddedImgRegex.exec(innerHtml)) !== null) {
         try {
@@ -1224,6 +1262,7 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
     sections: [
       {
         properties: {
+          titlePage: design.showCoverPage !== false,
           page: {
             margin: {
               top: 1440,
@@ -1239,6 +1278,15 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
               new Paragraph({
                 alignment: AlignmentType.CENTER,
                 bidirectional: true,
+                spacing: { after: 120 },
+                border: {
+                  bottom: {
+                    color: headerFooterBorderColor,
+                    space: 4,
+                    style: BorderStyle.SINGLE,
+                    size: 6,
+                  },
+                },
                 children: [
                   new TextRun({
                     text: headerText,
@@ -1252,12 +1300,21 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
             ],
           }),
         } : undefined,
-        footers: (showFooter || showPageNumbers) ? {
+        footers: ((showFooter && footerText) || showPageNumbers) ? {
           default: new Footer({
             children: [
               new Paragraph({
                 alignment: AlignmentType.CENTER,
                 bidirectional: true,
+                spacing: { before: 120 },
+                border: {
+                  top: {
+                    color: headerFooterBorderColor,
+                    space: 4,
+                    style: BorderStyle.SINGLE,
+                    size: 6,
+                  },
+                },
                 children: [
                   ...(footerText ? [
                     new TextRun({
@@ -1355,7 +1412,7 @@ export async function downloadDocx(project: BookProject, options?: DocxExportOpt
           bookId: project.id,
           title: project.title || project.originalTitle || 'کتاب ترجمه شده',
           author: project.author,
-          translator: project.translator || 'سامانه هوشمند ترجمه کتاب',
+          translator: project.translator || '',
           originalTitle: project.originalTitle,
           designConfig: project.designConfig,
           useAdminCopy: Boolean(options?.useAdminCopy),
@@ -1417,7 +1474,7 @@ export async function downloadDocx(project: BookProject, options?: DocxExportOpt
           body: JSON.stringify({
             title: project.title || project.originalTitle || 'کتاب ترجمه شده',
             author: project.author,
-            translator: project.translator || 'سامانه هوشمند ترجمه کتاب',
+            translator: project.translator || '',
             originalTitle: project.originalTitle,
             chapters: groupedChapters.map(ch => ({
               title: ch.title,
@@ -1480,7 +1537,11 @@ export function downloadWordHtml(project: BookProject) {
   const headerColor = customColors.headerColor || '#718096';
   const footerColor = customColors.footerColor || '#718096';
   const textColor = customColors.textColor || theme.textColor || '#2d3748';
-  const accentColor = customColors.accentColor || theme.accentColor || '#b45309';
+  const borderColor = customColors.borderColor || theme.borderColor || '#cbd5e1';
+  const headerParts = [design.headerText?.trim(), design.websiteUrl?.trim()].filter(Boolean) as string[];
+  const effectiveHeader = design.showHeader && headerParts.length > 0 ? headerParts.join(' • ') : '';
+  const footerParts = [design.footerText?.trim(), design.brandName?.trim()].filter(Boolean) as string[];
+  const effectiveFooter = design.showFooter && footerParts.length > 0 ? footerParts.join(' • ') : '';
 
   const pMarginBottom =
     design.paragraphSpacing === 'generous'
@@ -1497,25 +1558,31 @@ export function downloadWordHtml(project: BookProject) {
     .map((ch, idx) => `
       ${idx > 0 && design.continuousFlow !== false ? '<div style="text-align: center; margin: 36px 0; font-size: 14pt; color: #b45309;">✤ ───── ❦ ───── ✤</div>' : ''}
       <div style="${idx > 0 && design.continuousFlow === false ? 'page-break-before: always; ' : ''}margin-top: 30px;">
-        ${design.showHeader && design.headerText ? `
-        <div style="border-bottom: 1px solid #cbd5e1; padding-bottom: 6px; margin-bottom: 24px; font-size: 9pt; color: ${headerColor}; display: flex; justify-content: space-between;">
-          <span>${design.headerText}</span>
-          <span dir="ltr">${project.originalTitle || ''}</span>
+        ${effectiveHeader ? `
+        <div style="border-bottom: 1px solid ${borderColor}; padding-bottom: 6px; margin-bottom: 24px; font-size: 9pt; color: ${headerColor}; text-align: center;">
+          <span>${effectiveHeader}</span>
         </div>` : ''}
         <div style="margin-top: 10px;">${ch.htmlContent}</div>
-        ${design.showFooter && design.footerText ? `
-        <div style="border-top: 1px solid #cbd5e1; padding-top: 6px; margin-top: 35px; font-size: 9pt; color: ${footerColor}; text-align: center;">
-          ${design.footerText}
+        ${effectiveFooter ? `
+        <div style="border-top: 1px solid ${borderColor}; padding-top: 6px; margin-top: 35px; font-size: 9pt; color: ${footerColor}; text-align: center;">
+          ${effectiveFooter}
         </div>` : ''}
       </div>
     `)
     .join('\n');
 
+  const coverMainTitle = design.coverPage?.title?.trim() || project.title?.trim() || project.originalTitle?.trim() || 'کتاب ترجمه شده';
+  const rawOrigTitle = project.originalTitle?.trim() || '';
+  const coverSubTitle = design.coverPage?.subtitle?.trim() || (rawOrigTitle && rawOrigTitle !== coverMainTitle && rawOrigTitle !== 'Untitled Book' && rawOrigTitle !== 'New Book' ? rawOrigTitle : '');
+  const coverAuthorName = design.coverPage?.author?.trim() || project.author?.trim() || '';
+  const rawTrans = project.translator?.trim() || '';
+  const coverTranslatorName = design.coverPage?.translator?.trim() || (rawTrans && rawTrans !== 'سامانه هوشمند ترجمه کتاب' && rawTrans !== 'سامانه ترجمه' ? rawTrans : '');
+
   const fullWordHtml = `
   <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
   <head>
     <meta charset="utf-8">
-    <title>${project.title}</title>
+    <title>${coverMainTitle}</title>
     <!--[if gte mso 9]>
     <xml>
       <w:WordDocument>
@@ -1554,10 +1621,10 @@ export function downloadWordHtml(project: BookProject) {
   </head>
   <body>
     <div style="text-align: center; margin-top: 80px; margin-bottom: 100px;">
-      <h1>${project.title || project.originalTitle}</h1>
-      <p style="font-size: 14pt; color: #4a5568;">نویسنده: ${project.author || 'نامشخص'}</p>
-      <p style="font-size: 12pt; color: ${footerColor}; font-style: italic;">مترجم: ${project.translator || 'سامانه هوشمند ترجمه کتاب'}</p>
-      ${design.showHeader && design.headerText ? `<p style="font-size: 11pt; color: ${headerColor}; margin-top: 15px;">${design.headerText}</p>` : ''}
+      <h1 style="text-align: center;">${coverMainTitle}</h1>
+      ${coverSubTitle ? `<p dir="auto" style="text-align: center; font-size: 14pt; color: #64748b;">${coverSubTitle}</p>` : ''}
+      ${coverAuthorName ? `<p style="text-align: center; font-size: 14pt; color: #4a5568;">نویسنده: ${coverAuthorName}</p>` : ''}
+      ${coverTranslatorName ? `<p style="text-align: center; font-size: 12pt; color: ${footerColor}; font-style: italic;">مترجم: ${coverTranslatorName}</p>` : ''}
     </div>
     ${chaptersHtml}
   </body>
@@ -1579,17 +1646,23 @@ export function downloadStyledHtml(project: BookProject) {
   const content = groupedChapters
     .map(ch => `
       <section class="chapter-section" style="margin-bottom: 50px; border-bottom: 1px solid #e2e8f0; padding-bottom: 30px;">
-        <h2 class="chapter-title" style="color: #1a365d; font-size: 20pt; text-align: center; margin-bottom: 25px;">${ch.title}</h2>
+        ${ch.title ? `<h2 class="chapter-title" style="color: #1a365d; font-size: 20pt; text-align: center; margin-bottom: 25px;">${ch.title}</h2>` : ''}
         ${ch.htmlContent}
       </section>
     `)
     .join('\n');
 
+  const mainTitle = project.title?.trim() || project.originalTitle?.trim() || 'کتاب ترجمه شده';
+  const rawOrigTitle = project.originalTitle?.trim() || '';
+  const subTitle = rawOrigTitle && rawOrigTitle !== mainTitle && rawOrigTitle !== 'Untitled Book' && rawOrigTitle !== 'New Book' ? rawOrigTitle : '';
+  const rawTrans = project.translator?.trim() || '';
+  const cleanTranslator = rawTrans && rawTrans !== 'سامانه هوشمند ترجمه کتاب' && rawTrans !== 'سامانه ترجمه' ? rawTrans : '';
+
   const htmlDoc = `<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
   <meta charset="UTF-8">
-  <title>${project.title || project.originalTitle}</title>
+  <title>${mainTitle}</title>
   <style>
     body {
       font-family: 'Vazirmatn', sans-serif;
@@ -1624,9 +1697,10 @@ export function downloadStyledHtml(project: BookProject) {
 <body>
   <div class="book-container">
     <div class="book-header">
-      <h1>${project.title || project.originalTitle}</h1>
-      <p style="font-size: 16px; color: #64748b; margin: 8px 0;">نویسنده: ${project.author || 'نامشخص'}</p>
-      <p style="font-size: 14px; color: #94a3b8; font-style: italic; margin: 5px 0;">مترجم: ${project.translator || 'سامانه هوشمند ترجمه کتاب'}</p>
+      <h1>${mainTitle}</h1>
+      ${subTitle ? `<p dir="auto" style="font-size: 15px; color: #64748b; text-align: center; margin: 6px 0;">${subTitle}</p>` : ''}
+      ${project.author ? `<p style="font-size: 16px; color: #64748b; text-align: center; margin: 8px 0;">نویسنده: ${project.author}</p>` : ''}
+      ${cleanTranslator ? `<p style="font-size: 14px; color: #94a3b8; font-style: italic; text-align: center; margin: 5px 0;">مترجم: ${cleanTranslator}</p>` : ''}
     </div>
     <div class="book-content">
       ${content}
@@ -1647,9 +1721,16 @@ export function downloadStyledHtml(project: BookProject) {
 }
 
 export function downloadPlainText(project: BookProject) {
-  let plain = `# ${project.title || project.originalTitle}\n`;
+  const mainTitle = project.title?.trim() || project.originalTitle?.trim() || 'کتاب ترجمه شده';
+  const rawOrigTitle = project.originalTitle?.trim() || '';
+  const subTitle = rawOrigTitle && rawOrigTitle !== mainTitle && rawOrigTitle !== 'Untitled Book' && rawOrigTitle !== 'New Book' ? rawOrigTitle : '';
+  const rawTrans = project.translator?.trim() || '';
+  const cleanTranslator = rawTrans && rawTrans !== 'سامانه هوشمند ترجمه کتاب' && rawTrans !== 'سامانه ترجمه' ? rawTrans : '';
+
+  let plain = `# ${mainTitle}\n`;
+  if (subTitle) plain += `${subTitle}\n`;
   if (project.author) plain += `نویسنده: ${project.author}\n`;
-  if (project.translator) plain += `مترجم: ${project.translator}\n`;
+  if (cleanTranslator) plain += `مترجم: ${cleanTranslator}\n`;
   plain += `\n=========================================\n\n`;
 
   const groupedChapters = groupChunksIntoChapters(project.chunks, project.designConfig?.excludedChunkIds);

@@ -128,7 +128,13 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
     initialConfig.coverPage?.titleColor || ''
   );
   const [coverSubtitle, setCoverSubtitle] = useState(
-    initialConfig.coverPage?.subtitle ?? (project.originalTitle && project.title ? project.originalTitle : '')
+    initialConfig.coverPage?.subtitle ??
+      (project.originalTitle &&
+      project.originalTitle !== 'Untitled Book' &&
+      project.originalTitle !== 'New Book' &&
+      project.originalTitle !== project.title
+        ? project.originalTitle
+        : '')
   );
   const [coverSubtitleSize, setCoverSubtitleSize] = useState<number>(
     initialConfig.coverPage?.subtitleSize || 14
@@ -137,7 +143,8 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
     initialConfig.coverPage?.subtitleColor || ''
   );
   const [coverAuthor, setCoverAuthor] = useState(
-    initialConfig.coverPage?.author ?? (project.author || '')
+    initialConfig.coverPage?.author ??
+      (project.author && project.author !== 'نامشخص' ? project.author : '')
   );
   const [coverAuthorSize, setCoverAuthorSize] = useState<number>(
     initialConfig.coverPage?.authorSize || 14
@@ -146,7 +153,12 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
     initialConfig.coverPage?.authorColor || ''
   );
   const [coverTranslator, setCoverTranslator] = useState(
-    initialConfig.coverPage?.translator ?? (project.translator || '')
+    initialConfig.coverPage?.translator ??
+      (project.translator &&
+      project.translator !== 'سامانه هوشمند ترجمه کتاب' &&
+      project.translator !== 'سامانه ترجمه'
+        ? project.translator
+        : '')
   );
   const [coverPublisher, setCoverPublisher] = useState(
     initialConfig.coverPage?.publisher ?? ''
@@ -431,13 +443,18 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
 
   // Quick Preset Helper for Header
   const applyHeaderPreset = (type: 'title_only' | 'site_url' | 'title_site' | 'clear') => {
-    setShowHeader(type !== 'clear');
     if (type === 'title_only') {
-      setHeaderText(project.title || project.originalTitle || 'کتاب ترجمه شده');
+      const nextText = project.title || project.originalTitle || '';
+      setHeaderText(nextText);
+      setShowHeader(Boolean(nextText));
     } else if (type === 'site_url') {
-      setHeaderText(websiteUrl || 'www.mywebsite.com');
+      const nextText = websiteUrl.trim();
+      setHeaderText(nextText);
+      setShowHeader(Boolean(nextText));
     } else if (type === 'title_site') {
-      setHeaderText(`${project.title || 'عنوان کتاب'} • ${websiteUrl || 'www.mywebsite.com'}`);
+      const nextText = [project.title || project.originalTitle, websiteUrl.trim()].filter(Boolean).join(' • ');
+      setHeaderText(nextText);
+      setShowHeader(Boolean(nextText));
     } else if (type === 'clear') {
       setHeaderText('');
       setShowHeader(false);
@@ -446,13 +463,22 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
 
   // Quick Preset Helper for Footer
   const applyFooterPreset = (type: 'copyright' | 'site_rights' | 'translator' | 'clear') => {
-    setShowFooter(type !== 'clear');
     if (type === 'copyright') {
       setFooterText('کلیه حقوق محفوظ است');
+      setShowFooter(true);
     } else if (type === 'site_rights') {
-      setFooterText(`ترجمه اختصاصی • ${websiteUrl || brandName || 'نسخه چاپی'}`);
+      const nextText = [websiteUrl.trim(), brandName.trim()].filter(Boolean).join(' • ');
+      setFooterText(nextText);
+      setShowFooter(Boolean(nextText));
     } else if (type === 'translator') {
-      setFooterText(`مترجم: ${project.translator || 'سامانه هوشمند ترجمه'}`);
+      const cleanTranslator =
+        project.translator &&
+        project.translator !== 'سامانه هوشمند ترجمه کتاب' &&
+        project.translator !== 'سامانه ترجمه'
+          ? project.translator
+          : '';
+      setFooterText(cleanTranslator ? `مترجم: ${cleanTranslator}` : '');
+      setShowFooter(Boolean(cleanTranslator));
     } else if (type === 'clear') {
       setFooterText('');
       setShowFooter(false);
@@ -877,7 +903,7 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                         type="text"
                         value={coverTranslator}
                         onChange={e => setCoverTranslator(e.target.value)}
-                        placeholder="مثلاً: سامانه هوشمند ترجمه"
+                        placeholder="اختیاری: نام مترجم"
                         className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-400"
                       />
                     </div>
@@ -887,7 +913,7 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                         type="text"
                         value={coverPublisher}
                         onChange={e => setCoverPublisher(e.target.value)}
-                        placeholder="مثلاً: انتشارات نگاه نوین یا www.mywebsite.com"
+                        placeholder="اختیاری: نام انتشارات یا ناشر"
                         className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-400"
                       />
                     </div>
@@ -1332,7 +1358,7 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                         type="text"
                         value={websiteUrl}
                         onChange={e => setWebsiteUrl(e.target.value)}
-                        placeholder="مثال: www.mywebsite.com"
+                        placeholder="اختیاری (در صورت خالی بودن چیزی درج نمی‌شود)"
                         className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                         dir="ltr"
                       />
@@ -1343,7 +1369,7 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                         type="text"
                         value={brandName}
                         onChange={e => setBrandName(e.target.value)}
-                        placeholder="مثال: انتشارات نوین اندیشه"
+                        placeholder="اختیاری: نام انتشارات"
                         className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                       />
                     </div>
@@ -1378,7 +1404,7 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                           type="text"
                           value={headerText}
                           onChange={e => setHeaderText(e.target.value)}
-                          placeholder="مثال: انتشارات نوین • www.mywebsite.com"
+                          placeholder="اختیاری: متن هدر بالای صفحه"
                           className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                         />
                       </div>
@@ -1451,7 +1477,7 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                           type="text"
                           value={footerText}
                           onChange={e => setFooterText(e.target.value)}
-                          placeholder="مثال: کلیه حقوق ترجمه محفوظ است • www.mywebsite.com"
+                          placeholder="اختیاری: متن فوتر پایین صفحه"
                           className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                         />
                       </div>
@@ -1882,7 +1908,7 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                     type="text"
                     value={watermarkText}
                     onChange={e => setWatermarkText(e.target.value)}
-                    placeholder="مثال: ترجمه اختصاصی www.mywebsite.com"
+                    placeholder="اختیاری: متن محو در پس‌زمینه صفحات"
                     className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-emerald-500"
                   />
                 </div>
@@ -2471,30 +2497,36 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                 /* ================= BODY PAGE PREVIEW ================= */
                 <>
                   {/* Running Header */}
-                  {showHeader && headerText ? (
-                    <div>
-                      <div
-                        className="border-b pb-2 flex items-center justify-between text-[10px] opacity-85"
-                        style={{
-                          borderColor: customColors.borderColor || activeTheme.borderColor,
-                          color: customColors.headerColor || activeTheme.textColor,
-                        }}
-                      >
-                        <span className="font-bold truncate max-w-[200px]">{headerText}</span>
-                        <span className="font-serif italic text-[9px] truncate max-w-[110px]" dir="ltr">
-                          {project.originalTitle || 'Chapter 1'}
-                        </span>
+                  {(() => {
+                    const previewHeaderText = showHeader
+                      ? [headerText?.trim(), websiteUrl?.trim()].filter(Boolean).join(' • ')
+                      : '';
+                    if (!previewHeaderText) {
+                      return (
+                        <div style={{ height: topMargin === 'compact' ? '12px' : topMargin === 'generous' ? '28px' : topMargin === 'extra_generous' ? '38px' : '18px' }} className="flex items-center justify-center">
+                          <span className="text-[8.5px] text-slate-400/50 italic border-b border-dashed border-slate-300/40 pb-0.5">
+                            (بدون هدر — خالی)
+                          </span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div>
+                        <div
+                          className="border-b pb-2 flex items-center justify-center text-[10px] opacity-85"
+                          style={{
+                            borderColor: customColors.borderColor || activeTheme.borderColor,
+                            color: customColors.headerColor || activeTheme.textColor,
+                          }}
+                        >
+                          <span className="font-bold truncate max-w-[260px]">{previewHeaderText}</span>
+                        </div>
+                        {/* Visual Top Margin Breathing Room */}
+                        <div style={{ height: topMargin === 'compact' ? '8px' : topMargin === 'generous' ? '20px' : topMargin === 'extra_generous' ? '30px' : '14px' }} />
                       </div>
-                      {/* Visual Top Margin Breathing Room */}
-                      <div style={{ height: topMargin === 'compact' ? '8px' : topMargin === 'generous' ? '20px' : topMargin === 'extra_generous' ? '30px' : '14px' }} />
-                    </div>
-                  ) : (
-                    <div style={{ height: topMargin === 'compact' ? '12px' : topMargin === 'generous' ? '28px' : topMargin === 'extra_generous' ? '38px' : '18px' }} className="flex items-center justify-center">
-                      <span className="text-[8.5px] text-slate-400/50 italic border-b border-dashed border-slate-300/40 pb-0.5">
-                        (حاشیه بالای صفحه: {topMargin === 'compact' ? 'فشرده' : topMargin === 'generous' ? 'باز' : topMargin === 'extra_generous' ? 'لوکس' : 'استاندارد کتابی'})
-                      </span>
-                    </div>
-                  )}
+                    );
+                  })()}
+
 
                   {/* Sample Content */}
                   <div className="my-auto py-3 space-y-2.5 text-right">
@@ -2580,32 +2612,30 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
                   </div>
 
                   {/* Running Footer */}
-                  {showFooter && footerText ? (
-                    <div
-                      className="border-t pt-2 flex items-center justify-between text-[10px] opacity-85"
-                      style={{
-                        borderColor: customColors.borderColor || activeTheme.borderColor,
-                        color: customColors.footerColor || activeTheme.textColor,
-                      }}
-                    >
-                      <span className="truncate max-w-[200px]">{footerText}</span>
-                      {showPageNumbers && <span className="font-bold font-mono">صفحه ۲۴</span>}
-                    </div>
-                  ) : showPageNumbers ? (
-                    <div
-                      className="border-t pt-1 flex items-center justify-end text-[10px] opacity-85"
-                      style={{
-                        borderColor: customColors.borderColor || activeTheme.borderColor,
-                        color: customColors.footerColor || activeTheme.textColor,
-                      }}
-                    >
-                      <span className="font-bold font-mono">صفحه ۲۴</span>
-                    </div>
-                  ) : (
-                    <div className="text-[9px] text-slate-400/50 pt-1 italic border-t border-dashed border-slate-300/40">
-                      (بدون فوتر در پایین صفحه)
-                    </div>
-                  )}
+                  {(() => {
+                    const previewFooterText = showFooter
+                      ? [footerText?.trim(), brandName?.trim()].filter(Boolean).join(' • ')
+                      : '';
+                    if (previewFooterText || showPageNumbers) {
+                      return (
+                        <div
+                          className="border-t pt-2 flex items-center justify-between text-[10px] opacity-85"
+                          style={{
+                            borderColor: customColors.borderColor || activeTheme.borderColor,
+                            color: customColors.footerColor || activeTheme.textColor,
+                          }}
+                        >
+                          <span className="truncate max-w-[200px]">{previewFooterText}</span>
+                          {showPageNumbers && <span className="font-bold font-mono">صفحه ۲۴</span>}
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="text-[9px] text-slate-400/50 pt-1 italic border-t border-dashed border-slate-300/40">
+                        (بدون فوتر — خالی)
+                      </div>
+                    );
+                  })()}
                 </>
               )}
             </div>

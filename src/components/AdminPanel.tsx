@@ -922,10 +922,10 @@ export function AdminPanel({ currentUser, onBackToUserPanel, onLogout, onCostPer
         textAlignment: book.designConfig?.textAlignment || ('right' as const),
         fontFamily: book.designConfig?.fontFamily || 'Vazirmatn Medium',
         themeId: book.designConfig?.themeId || ('spiritual' as any),
-        showHeader: book.designConfig?.showHeader ?? true,
-        showFooter: book.designConfig?.showFooter ?? true,
-        headerText: book.designConfig?.headerText || title,
-        footerText: book.hasAdminCopy ? 'نسخه اختصاصی ویرایش مدیریت' : (book.designConfig?.footerText || 'سامانه هوشمند ترجمه کتاب'),
+        showHeader: book.designConfig?.showHeader ?? false,
+        showFooter: book.designConfig?.showFooter ?? false,
+        headerText: book.designConfig?.headerText || '',
+        footerText: book.designConfig?.footerText || '',
       },
     };
 
@@ -942,6 +942,8 @@ export function AdminPanel({ currentUser, onBackToUserPanel, onLogout, onCostPer
     const fullBook = await fetchBookDetailsIfNeeded(book);
     const sourceData = (fullBook.hasAdminCopy && fullBook.adminCopy) ? fullBook.adminCopy : fullBook;
     const title = sourceData.title || fullBook.title || 'کتاب ترجمه شده';
+    const origTitle = sourceData.originalTitle || fullBook.originalTitle || '';
+    const bookAuthor = sourceData.author || fullBook.author || '';
     let chaptersHtml = '';
     const chunks = sourceData.chunks || fullBook.chunks || [];
     if (chunks && chunks.length > 0) {
@@ -965,19 +967,18 @@ export function AdminPanel({ currentUser, onBackToUserPanel, onLogout, onCostPer
         <style>
           @page { size: A4; margin: 2.5cm; }
           body { font-family: 'Vazirmatn', 'B Nazanin', 'Tahoma', Arial, sans-serif; direction: rtl; text-align: right; line-height: 2.1; font-size: 12.5pt; color: #111; }
-          h1 { color: #0f172a; font-size: 22pt; font-weight: bold; text-align: right; margin-bottom: 12px; }
+          h1 { color: #0f172a; font-size: 22pt; font-weight: bold; text-align: center; margin-bottom: 12px; }
           h2 { color: #1e3a8a; font-size: 17pt; font-weight: bold; text-align: right; }
           p, div { text-align: right; text-justify: none; }
           .meta { text-align: center; color: #64748b; font-size: 11pt; margin-bottom: 30px; }
+          .meta p { text-align: center; margin: 4px 0; }
         </style>
       </head>
       <body dir="rtl">
         <h1>${title}</h1>
         <div class="meta">
-          ${sourceData.originalTitle || fullBook.originalTitle ? `<p>عنوان زبان اصلی: ${sourceData.originalTitle || fullBook.originalTitle}</p>` : ''}
-          ${sourceData.author || fullBook.author ? `<p>نویسنده: ${sourceData.author || fullBook.author}</p>` : ''}
-          <p>خروجی رسمی مترجم هوش مصنوعی | تاریخ: ${new Date().toLocaleDateString('fa-IR-u-nu-latn')}</p>
-          ${fullBook.hasAdminCopy ? '<p style="color:#7c3aed; font-weight:bold;">نسخه اختصاصی ویرایش مدیریت</p>' : ''}
+          ${origTitle && origTitle !== 'Untitled Book' && origTitle !== 'New Book' ? `<p dir="ltr">${origTitle}</p>` : ''}
+          ${bookAuthor && bookAuthor !== 'نامشخص' ? `<p>نویسنده: ${bookAuthor}</p>` : ''}
         </div>
         <hr/>
         ${chaptersHtml}

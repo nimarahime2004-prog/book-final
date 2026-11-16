@@ -418,31 +418,28 @@ export function restoreImages(html: string, imageMap: Map<string, string>): stri
       });
     }
 
-    // If the token was not preserved by the AI, append only if the image is not already present in the HTML
+    // If the token was not preserved by the AI, append only if the exact image is not already present in the HTML
     if (!replaced) {
-      const srcMatch = fullTag.match(/src=["']([^"']+)["']/i);
+      const srcMatch = fullTag.match(/\bsrc=["']([^"']+)["']/i);
       const src = srcMatch ? srcMatch[1] : '';
-      const srcSnippet = src.length > 50 ? src.slice(0, 50) : src;
-      const alreadyInHtml = srcSnippet && restored.includes(srcSnippet);
+      const alreadyInHtml = Boolean(src) && restored.includes(src);
       if (!alreadyInHtml) {
         restored += `\n<div class="book-illustration-wrap my-4 text-center">${fullTag}</div>\n`;
       }
     }
   }
 
-  // Final Strict Deduplication Pass: Ensure no identical image tag/src appears more than once in the translated chunk
+  // Final Deduplication Pass (full src comparison so distinct images sharing headers are never falsely dropped)
   const seenImageSrcs = new Set<string>();
   restored = restored.replace(
-    /(?:<div[^>]*class="[^"]*book-illustration-wrap[^"]*"[^>]*>[\s\S]*?<img\s+[^>]*src=["']([^"']+)["'][^>]*>[\s\S]*?<\/div>|<figure[^>]*>[\s\S]*?<img\s+[^>]*src=["']([^"']+)["'][^>]*>[\s\S]*?<\/figure>|<img\s+[^>]*src=["']([^"']+)["'][^>]*>)/gi,
+    /(?:<div[^>]*class="[^"]*book-illustration-wrap[^"]*"[^>]*>[\s\S]*?<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/div>|<figure[^>]*>[\s\S]*?<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>[\s\S]*?<\/figure>|<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>)/gi,
     (wholeMatch, src1, src2, src3) => {
       const src = src1 || src2 || src3;
       if (!src) return wholeMatch;
-      const fingerprint = src.length > 250 ? src.slice(0, 250) : src;
-      if (seenImageSrcs.has(fingerprint)) {
-        // Redundant duplicate image eliminated!
+      if (seenImageSrcs.has(src)) {
         return '';
       }
-      seenImageSrcs.add(fingerprint);
+      seenImageSrcs.add(src);
       return wholeMatch;
     }
   );
@@ -464,19 +461,18 @@ export async function translateDirectFromClient({
   glossary?: GlossaryItem[];
   serverPool: APIServerEndpoint[];
 }): Promise<{ translatedHtml: string; serverUsed: string; modelUsed: string; switchOccurred: boolean }> {
-  // Extract images with strict deduplication of identical images in source chunk
+  // Extract images with exact deduplication of identical images in source chunk
   const imagePlaceholderMap = new Map<string, string>();
   const seenInputSrcs = new Set<string>();
   let cleanEnglishText = englishText;
-  const imgRegex = /<img\s+[^>]*src=["'](data:[^"']+)["'][^>]*>/gi;
+  const imgRegex = /<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi;
   let imgIndex = 0;
   cleanEnglishText = englishText.replace(imgRegex, (fullImgTag, srcData) => {
-    const fingerprint = srcData ? srcData.slice(0, 250) : fullImgTag;
-    if (seenInputSrcs.has(fingerprint)) {
-      // Skip redundant duplicate image tag in source input
+    const exactKey = srcData || fullImgTag;
+    if (seenInputSrcs.has(exactKey)) {
       return '';
     }
-    seenInputSrcs.add(fingerprint);
+    seenInputSrcs.add(exactKey);
     const placeholderToken = `[[IMAGE_PRESERVED_SLOT_${imgIndex}]]`;
     imagePlaceholderMap.set(placeholderToken, fullImgTag);
     imgIndex++;

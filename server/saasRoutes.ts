@@ -1205,7 +1205,7 @@ ${urls.map((u) => `  <url>
       title: title.trim(),
       originalTitle: (originalTitle || title).trim(),
       author: (author || 'نامشخص').trim(),
-      translator: (translator || user.name || 'سامانه هوشمند ترجمه کتاب').trim(),
+      translator: (translator || user.name || '').trim(),
       tone: tone || 'spiritual',
       sourceLanguage: sourceLanguage || 'en',
       targetLanguage: targetLanguage || 'fa',

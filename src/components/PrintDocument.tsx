@@ -92,9 +92,13 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({
 
   const fontFamily = design.fontFamily || 'Vazirmatn Medium';
 
-  const showRunningHeader = design.showHeader && Boolean(design.headerText?.trim());
-  const showRunningFooter = design.showFooter && (Boolean(design.footerText?.trim()) || design.showPageNumbers !== false);
+  // Strictly respect empty header/footer — never inject unsolicited domain or platform names
+  const rawHeaderParts = [design.headerText?.trim(), design.websiteUrl?.trim()].filter(Boolean) as string[];
+  const showRunningHeader = design.showHeader === true && rawHeaderParts.length > 0;
   const showPageNumbers = design.showPageNumbers !== false;
+  const rawFooterParts = [design.footerText?.trim(), design.brandName?.trim()].filter(Boolean) as string[];
+  const hasFooterText = design.showFooter === true && rawFooterParts.length > 0;
+  const showRunningFooter = hasFooterText || showPageNumbers;
 
   const topMarginMm =
     design.topMargin === 'compact'
@@ -105,7 +109,7 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({
       ? 28
       : 16;
 
-  const bottomMarginMm = showRunningFooter || showPageNumbers ? 16 : 14;
+  const bottomMarginMm = showRunningFooter ? 17 : 14;
 
   const horizontalMarginMm =
     design.pageMargin === 'compact'
@@ -125,49 +129,53 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({
   );
   const isLargeBook = totalSectionsCount > 80;
 
-  const headerLabel = showRunningHeader
-    ? escapeCssContent(
-        `${design.headerText?.trim() || project.title}${design.websiteUrl ? ` • ${design.websiteUrl}` : ''}`
-      )
-    : '';
-  const footerLabel = showRunningFooter
-    ? escapeCssContent(
-        `${design.footerText?.trim() || 'سامانه ترجمه و نشر کتاب'}${design.brandName ? ` • ${design.brandName}` : ''}`
-      )
-    : '';
+  const headerLabel = showRunningHeader ? escapeCssContent(rawHeaderParts.join(' • ')) : '';
+  const footerLabel = hasFooterText ? escapeCssContent(rawFooterParts.join(' • ')) : '';
 
   const dynamicPageCss = `
     @page {
       size: A4 portrait;
       margin: ${topMarginMm}mm 0mm ${bottomMarginMm}mm 0mm !important;
       background: ${pageBgColor};
-      @top-left { content: none !important; }
-      @top-right { content: none !important; }
-      @bottom-left { content: none !important; }
-      @bottom-right { content: none !important; }
+      @top-left {
+        ${showRunningHeader && headerLabel ? `content: ""; width: ${horizontalMarginMm}mm;` : 'content: none !important;'}
+      }
+      @top-right {
+        ${showRunningHeader && headerLabel ? `content: ""; width: ${horizontalMarginMm}mm;` : 'content: none !important;'}
+      }
       @top-center {
         ${
           showRunningHeader && headerLabel
-            ? `content: "${headerLabel}"; font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${headerColor}; vertical-align: bottom; padding-bottom: 4mm;`
-            : 'content: none !important;'
+            ? `content: "${headerLabel}"; width: 100%; font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${headerColor}; vertical-align: bottom; padding-bottom: 2.5mm; margin-bottom: 1.5mm; border-bottom: 0.75pt solid ${borderColor};`
+            : 'content: none !important; border: none !important;'
         }
+      }
+      @bottom-left {
+        ${showRunningFooter ? `content: ""; width: ${horizontalMarginMm}mm;` : 'content: none !important;'}
+      }
+      @bottom-right {
+        ${showRunningFooter ? `content: ""; width: ${horizontalMarginMm}mm;` : 'content: none !important;'}
       }
       @bottom-center {
         ${
-          showRunningFooter && showPageNumbers
-            ? `content: "${footerLabel}  •  صفحه " counter(page); font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 4mm;`
-            : showRunningFooter
-            ? `content: "${footerLabel}"; font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 4mm;`
+          hasFooterText && showPageNumbers
+            ? `content: "${footerLabel}  •  صفحه " counter(page); width: 100%; font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 2.5mm; margin-top: 1.5mm; border-top: 0.75pt solid ${borderColor};`
+            : hasFooterText
+            ? `content: "${footerLabel}"; width: 100%; font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 2.5mm; margin-top: 1.5mm; border-top: 0.75pt solid ${borderColor};`
             : showPageNumbers
-            ? `content: "صفحه " counter(page); font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 4mm;`
-            : 'content: none !important;'
+            ? `content: "صفحه " counter(page); width: 100%; font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 2.5mm; margin-top: 1.5mm; border-top: 0.75pt solid ${borderColor};`
+            : 'content: none !important; border: none !important;'
         }
       }
     }
     @page :first {
       margin-top: 10mm !important;
-      @top-center { content: none !important; }
-      @bottom-center { content: none !important; }
+      @top-left { content: none !important; border: none !important; }
+      @top-center { content: none !important; border: none !important; }
+      @top-right { content: none !important; border: none !important; }
+      @bottom-left { content: none !important; border: none !important; }
+      @bottom-center { content: none !important; border: none !important; }
+      @bottom-right { content: none !important; border: none !important; }
     }
   `;
 
@@ -248,11 +256,19 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({
             const isRightAlign = coverLayout === 'right' || coverLayout === 'right_aligned';
             const isFramed = coverLayout === 'frame' || coverLayout === 'framed_spiritual';
 
-            const coverTitle = cover.title || project.title || project.originalTitle || 'کتاب بدون عنوان';
-            const coverSubtitle = cover.subtitle !== undefined ? cover.subtitle : project.originalTitle;
-            const coverAuthor = cover.author !== undefined ? cover.author : project.author;
-            const coverTranslator = cover.translator !== undefined ? cover.translator : project.translator;
-            const coverPublisher = cover.publisher !== undefined ? cover.publisher : design.brandName;
+            const coverTitle = cover.title?.trim() || project.title?.trim() || project.originalTitle?.trim() || 'کتاب بدون عنوان';
+            const rawOrig = project.originalTitle?.trim() || '';
+            const cleanOrig =
+              rawOrig && rawOrig !== coverTitle && rawOrig !== 'Untitled Book' && rawOrig !== 'New Book' ? rawOrig : '';
+            const coverSubtitle = cover.subtitle?.trim() || cleanOrig;
+            const rawAuthor = project.author?.trim() || '';
+            const cleanAuthor = rawAuthor && rawAuthor !== 'نامشخص' ? rawAuthor : '';
+            const coverAuthor = cover.author?.trim() || cleanAuthor;
+            const rawTrans = project.translator?.trim() || '';
+            const cleanTrans =
+              rawTrans && rawTrans !== 'سامانه هوشمند ترجمه کتاب' && rawTrans !== 'سامانه ترجمه' ? rawTrans : '';
+            const coverTranslator = cover.translator?.trim() || cleanTrans;
+            const coverPublisher = cover.publisher?.trim() || design.brandName?.trim() || '';
             const coverNote = cover.note || cover.editionYear;
 
             const titleSizePt = cover.titleSize || 32;
