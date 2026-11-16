@@ -210,30 +210,30 @@ export function formatFootnotesAndReferences(html: string): string {
  * Removes any artificial chunk headers injected by AI models into HTML, strips raw URLs,
  * and formats footnotes for elegant book typography.
  */
-export function sanitizeTranslatedHtml(html: string): string {
+export function sanitizeTranslatedHtml(html: string, sharedSeenImgSrcs?: Set<string>): string {
   if (!html || typeof html !== 'string') return '';
   try {
     // Strip ugly raw URLs and hyperlinks from book text
     let sanitized = stripBookUrls(html);
 
     sanitized = sanitized
-      .replace(/<span[^>]*style=["'][^"']*#(?:9b2c2c|c53030|e53e3e)[^"']*["'][^>]*>([\s\S]*?)<\/span>/gi, '$1')
-      .replace(/<span[^>]*class=["'][^"']*highlight[^"']*["'][^>]*>([\s\S]*?)<\/span>/gi, '$1')
+      .replace(/<span[^>]*style=["'][^"']*#(?:9b2c2c|c53030|e53e3e)[^"']*["'][^>]*>([^<]*)<\/span>/gi, '$1')
+      .replace(/<span[^>]*class=["'][^"']*highlight[^"']*["'][^>]*>([^<]*)<\/span>/gi, '$1')
       .replace(/<h[1-3][^>]*>\s*مقدمه و بخش نخست\s*(?:\([^\)]*\))?\s*<\/h[1-3]>/gi, '')
       .replace(/<h[1-3][^>]*>[^<]*[\(\[\{]\s*بخش\s*[0-9۰-۹IVXLCDMivxlcdm]+\s*[\)\]\}][^<]*<\/h[1-3]>/gi, '')
       .replace(/<p[^>]*>\s*[\(\[\{]?\s*بخش\s*[0-9۰-۹IVXLCDMivxlcdm]+\s*[\)\]\}]?\s*<\/p>/gi, '')
       .replace(/(?:margin-right|margin-left|padding-right|padding-left|text-indent)\s*:\s*[^;"]+;?/gi, '')
-      // Strip chatbot conversational remarks and meta-fillers (e.g. "اگر متن اصلی ... را ارسال کنید...")
-      .replace(/(?:<p[^>]*>)?\s*(?:اگر|چنانچه|در\s+صورت\s+اینکه|در\s+صورتی\s+که|لطفاً|خواهشمند\s+است)\s+(?:متن\s+اصلی|متن\s+کتاب|پاراگراف‌ها|دیالوگ‌ها|ادامه\s+متن)[\s\S]*?(?:ارائه\s+می‌?کنم|ترجمه\s+خواهم\s+کرد|ارسال\s+فرمایید|ارسال\s+کنید|در\s+اختیار\s+قرار\s+دهید|خدمت\s+شما\s+ارائه\s+می‌?گردد)[.!?؟\s]*(?:<\/p>)?/gi, '')
-      .replace(/(?:<p[^>]*>)?\s*اگر\s+متن\s+اصلی\s*\([^\)]*\)\s*را\s+ارسال\s+کنید[\s\S]*?(?:<\/p>)?/gi, '')
-      .replace(/(?:<p[^>]*>)?\s*[^<]*رعایت\s+واژگان\s+تثبیت[\s\S]*?پیوند\s+ریتمیک[^<]*(?:<\/p>)?/gi, '')
+      // Strip chatbot conversational remarks and meta-fillers (bounded quantifiers to prevent backtracking hangs)
+      .replace(/(?:<p[^>]*>)?\s*(?:اگر|چنانچه|در\s+صورت\s+اینکه|در\s+صورتی\s+که|لطفاً|خواهشمند\s+است)\s+(?:متن\s+اصلی|متن\s+کتاب|پاراگراف‌ها|دیالوگ‌ها|ادامه\s+متن)[^<]{0,400}(?:ارائه\s+می‌?کنم|ترجمه\s+خواهم\s+کرد|ارسال\s+فرمایید|ارسال\s+کنید|در\s+اختیار\s+قرار\s+دهید|خدمت\s+شما\s+ارائه\s+می‌?گردد)[.!?؟\s]*(?:<\/p>)?/gi, '')
+      .replace(/(?:<p[^>]*>)?\s*اگر\s+متن\s+اصلی\s*\([^\)]*\)\s*را\s+ارسال\s+کنید[^<]{0,300}(?:<\/p>)?/gi, '')
+      .replace(/(?:<p[^>]*>)?\s*[^<]{0,200}رعایت\s+واژگان\s+تثبیت[^<]{0,200}پیوند\s+ریتمیک[^<]{0,120}(?:<\/p>)?/gi, '')
       .replace(/(?:<p[^>]*>)?\s*(?:لطفاً|خواهشمند\s+است)\s+متن\s+اصلی\s+را\s+ارسال\s+کنید[.!?؟\s]*(?:<\/p>)?/gi, '')
-      .replace(/(?:<p[^>]*>)?\s*(?:Please provide the text|If you provide the text|Waiting for the text)[\s\S]*?(?:<\/p>)?/gi, '')
+      .replace(/(?:<p[^>]*>)?\s*(?:Please provide the text|If you provide the text|Waiting for the text)[^<]{0,300}(?:<\/p>)?/gi, '')
       .trim();
 
     // Fast & safe non-backtracking image deduplication
     if (sanitized.includes('<img')) {
-      const seenSrcs = new Set<string>();
+      const seenSrcs = sharedSeenImgSrcs || new Set<string>();
       sanitized = sanitized.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (match, src) => {
         if (!src) return match;
         const fingerprint = src.length > 250 ? src.slice(0, 250) : src;
@@ -457,15 +457,27 @@ export interface GroupedChapter {
   chapterKey: string;
   title: string;
   htmlContent: string;
+  sections?: Array<{ id: string; html: string }>;
 }
 
 /**
  * Groups consecutive chunks belonging to the same chapter into one continuous chapter flow.
- * Ensures the chapter title is displayed only ONCE and sub-chunks flow seamlessly without repeating headers or mid-chapter page breaks.
+ * Deduplicates images across the entire book in O(N) without re-running heavy regexes on concatenated mega-strings.
  */
-export function groupChunksIntoChapters(chunks: BookChunk[], excludedChunkIds?: string[]): GroupedChapter[] {
+export function groupChunksIntoChapters(
+  chunks: BookChunk[],
+  excludedChunkIds?: string[],
+  pageRange?: { start?: number; end?: number }
+): GroupedChapter[] {
   const excludedSet = new Set(excludedChunkIds || []);
-  const validChunks = (chunks || []).filter(c =>
+  let sourceChunks = chunks || [];
+  if (pageRange && (Number(pageRange.start) > 0 || Number(pageRange.end) > 0)) {
+    const startIdx = Math.max(0, (Number(pageRange.start) || 1) - 1);
+    const endIdx = Number(pageRange.end) > 0 ? Math.min(sourceChunks.length, Number(pageRange.end)) : sourceChunks.length;
+    sourceChunks = sourceChunks.slice(startIdx, endIdx);
+  }
+
+  const validChunks = sourceChunks.filter(c =>
     c &&
     !c.isExcludedFromBook &&
     !excludedSet.has(c.id) &&
@@ -479,40 +491,113 @@ export function groupChunksIntoChapters(chunks: BookChunk[], excludedChunkIds?: 
   const isPageBased = pageChunkCount >= Math.min(2, validChunks.length);
 
   const chapters: GroupedChapter[] = [];
+  const seenImgSrcs = new Set<string>();
   let currentChapter: GroupedChapter | null = null;
 
-  for (const chunk of validChunks) {
+  for (let i = 0; i < validChunks.length; i++) {
+    const chunk = validChunks[i];
     const rawTitle = chunk.chapterTitle || 'فصل کتاب';
     const cleanedTitle = cleanChapterTitle(rawTitle);
-    const sanitizedChunkHtml = sanitizeTranslatedHtml(chunk.translatedHtml || '');
+    const sanitizedChunkHtml = sanitizeTranslatedHtml(chunk.translatedHtml || '', seenImgSrcs);
     if (!sanitizedChunkHtml) continue;
 
     const isThisChunkPage = /^(صفحه|page)\s*\d+/i.test(cleanedTitle);
 
-    // If PDF pages, keep continuous flow under unified book body so pages flow seamlessly underneath each other
     const chapterKey = isPageBased
       ? (isThisChunkPage ? 'continuous_book_stream' : cleanedTitle)
       : (chunk.chapterNumber ? `ch_${chunk.chapterNumber}` : cleanedTitle);
 
     const chapterTitle = (isPageBased && isThisChunkPage) ? '' : cleanedTitle;
+    const sectionItem = { id: chunk.id || `sec_${i}`, html: sanitizedChunkHtml };
 
     if (!currentChapter || currentChapter.chapterKey !== chapterKey) {
       currentChapter = {
         chapterKey,
         title: chapterTitle,
         htmlContent: sanitizedChunkHtml,
+        sections: [sectionItem],
       };
       chapters.push(currentChapter);
     } else {
+      currentChapter.sections!.push(sectionItem);
       currentChapter.htmlContent += `\n${sanitizedChunkHtml}`;
     }
   }
 
-  // Ensure strict image deduplication on concatenated chapter content
-  chapters.forEach(ch => {
-    ch.htmlContent = sanitizeTranslatedHtml(ch.htmlContent);
-  });
+  return chapters;
+}
 
+/**
+ * Cooperative async version of groupChunksIntoChapters for 100-500+ page print preparation.
+ * Yields to the browser main thread every 15 chunks so Chrome never pops "Page Unresponsive",
+ * and omits mega-string concatenation when only `sections` are needed for incremental DOM rendering.
+ */
+export async function prepareChaptersForPrintAsync(
+  chunks: BookChunk[],
+  options?: {
+    excludedChunkIds?: string[];
+    pageRange?: { start?: number; end?: number };
+    onProgress?: (processed: number, total: number) => void;
+  }
+): Promise<GroupedChapter[]> {
+  const excludedSet = new Set(options?.excludedChunkIds || []);
+  let sourceChunks = chunks || [];
+  if (options?.pageRange && (Number(options.pageRange.start) > 0 || Number(options.pageRange.end) > 0)) {
+    const startIdx = Math.max(0, (Number(options.pageRange.start) || 1) - 1);
+    const endIdx = Number(options.pageRange.end) > 0 ? Math.min(sourceChunks.length, Number(options.pageRange.end)) : sourceChunks.length;
+    sourceChunks = sourceChunks.slice(startIdx, endIdx);
+  }
+
+  const validChunks = sourceChunks.filter(c =>
+    c &&
+    !c.isExcludedFromBook &&
+    !excludedSet.has(c.id) &&
+    c.translatedHtml &&
+    c.translatedHtml.trim().length > 0
+  );
+  if (validChunks.length === 0) return [];
+
+  const pageChunkCount = validChunks.filter(c => /^(صفحه|page)\s*\d+/i.test(c.chapterTitle?.trim() || '')).length;
+  const isPageBased = pageChunkCount >= Math.min(2, validChunks.length);
+
+  const chapters: GroupedChapter[] = [];
+  const seenImgSrcs = new Set<string>();
+  let currentChapter: GroupedChapter | null = null;
+
+  for (let i = 0; i < validChunks.length; i++) {
+    if (i > 0 && i % 15 === 0) {
+      options?.onProgress?.(i, validChunks.length);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    const chunk = validChunks[i];
+    const rawTitle = chunk.chapterTitle || 'فصل کتاب';
+    const cleanedTitle = cleanChapterTitle(rawTitle);
+    const sanitizedChunkHtml = sanitizeTranslatedHtml(chunk.translatedHtml || '', seenImgSrcs);
+    if (!sanitizedChunkHtml) continue;
+
+    const isThisChunkPage = /^(صفحه|page)\s*\d+/i.test(cleanedTitle);
+    const chapterKey = isPageBased
+      ? (isThisChunkPage ? 'continuous_book_stream' : cleanedTitle)
+      : (chunk.chapterNumber ? `ch_${chunk.chapterNumber}` : cleanedTitle);
+
+    const chapterTitle = (isPageBased && isThisChunkPage) ? '' : cleanedTitle;
+    const sectionItem = { id: chunk.id || `sec_${i}`, html: sanitizedChunkHtml };
+
+    if (!currentChapter || currentChapter.chapterKey !== chapterKey) {
+      currentChapter = {
+        chapterKey,
+        title: chapterTitle,
+        htmlContent: '', // Kept empty during print to avoid duplicating mega-MB strings in memory
+        sections: [sectionItem],
+      };
+      chapters.push(currentChapter);
+    } else {
+      currentChapter.sections!.push(sectionItem);
+    }
+  }
+
+  options?.onProgress?.(validChunks.length, validChunks.length);
   return chapters;
 }
 
@@ -1211,68 +1296,40 @@ export async function buildClientDocxDocument(project: BookProject): Promise<Doc
   });
 }
 
+export interface DocxExportOptions {
+  useAdminCopy?: boolean;
+  pageRange?: { start?: number; end?: number };
+  forceInline?: boolean;
+}
+
 /**
  * Downloads high-fidelity Persian DOCX file.
- * Prioritizes high-capacity server-side generation (/api/export/docx) for speed,
- * preventing browser tab crashes and memory freezes on 100-500+ page books.
- * Falls back to cooperative client-side generation and Word-HTML if server is unreachable.
+ * Sends a lightweight ~1KB `{ bookId, designConfig, pageRange }` request to /api/export/docx so the server
+ * builds the document directly from disk without uploading tens of megabytes through Nginx (prevents 413/timeouts),
+ * and avoids crashing browser RAM on >100-page books.
  */
-export async function downloadDocx(project: BookProject): Promise<boolean> {
+export async function downloadDocx(project: BookProject, options?: DocxExportOptions): Promise<boolean> {
+  const hasServerBookId = Boolean(
+    project.id &&
+      project.id !== 'placeholder_book' &&
+      !project.id.startsWith('sample_')
+  );
+
   const validChunks = (project.chunks || [])
     .filter(c => c && c.translatedHtml && c.translatedHtml.trim().length > 0 && !c.isExcludedFromBook);
 
-  if (validChunks.length === 0) {
-    alert('هیچ بخشی هنوز ترجمه نشده است.');
-    return false;
+  const serverHasTranslated = (project as any).completedChunks > 0 || Boolean(project.hasAdminCopy);
+
+  if (validChunks.length === 0 && !(hasServerBookId && serverHasTranslated)) {
+    throw new Error('هیچ بخش ترجمه‌شده‌ای برای خروجی Word وجود ندارد.');
   }
 
-  const groupedChapters = groupChunksIntoChapters(project.chunks, project.designConfig?.excludedChunkIds);
+  const token =
+    typeof window !== 'undefined' ? localStorage.getItem('auth_token') || '' : '';
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  // 1. Try High-Capacity Server Endpoint FIRST (handles 100 to 1,000+ pages in seconds without browser memory spikes)
-  try {
-    const res = await fetch(resolveApiUrl('/api/export/docx'), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: project.title || project.originalTitle || 'کتاب ترجمه شده',
-        author: project.author,
-        translator: project.translator || 'سامانه هوشمند ترجمه کتاب',
-        chapters: groupedChapters.map(ch => ({
-          title: ch.title,
-          htmlContent: ch.htmlContent,
-        })),
-        designConfig: project.designConfig,
-      }),
-    });
-
-    if (res.ok) {
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('text/html')) {
-        const blob = await res.blob();
-        if (blob && blob.size > 100) {
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `${project.title || project.originalTitle || 'book-translated'}.docx`;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          return true;
-        }
-      }
-    }
-    console.warn('Server docx endpoint returned unexpected response, attempting client generation...');
-  } catch (serverErr) {
-    console.warn('Server docx endpoint unavailable, falling back to browser generation:', serverErr);
-  }
-
-  // 2. Cooperative Client-Side DOCX Generation Fallback
-  try {
-    const docx = await import('docx');
-    const doc = await buildClientDocxDocument(project);
-    const blob = await docx.Packer.toBlob(doc);
-
+  const triggerBlobDownload = (blob: Blob) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1280,13 +1337,128 @@ export async function downloadDocx(project: BookProject): Promise<boolean> {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    return true;
-  } catch (clientErr: any) {
-    console.error('Client docx generation failed, falling back to Word-HTML format:', clientErr);
-    downloadWordHtml(project);
-    return true;
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  };
+
+  let lastServerError = '';
+
+  // 1. Primary Path: Lightweight bookId-based Server DOCX Generation (prevents Nginx 413 & browser OOM)
+  if (hasServerBookId && !options?.forceInline) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 min ceiling for huge 500+ page books
+      const res = await fetch(resolveApiUrl('/api/export/docx'), {
+        method: 'POST',
+        headers,
+        signal: controller.signal,
+        body: JSON.stringify({
+          bookId: project.id,
+          title: project.title || project.originalTitle || 'کتاب ترجمه شده',
+          author: project.author,
+          translator: project.translator || 'سامانه هوشمند ترجمه کتاب',
+          originalTitle: project.originalTitle,
+          designConfig: project.designConfig,
+          useAdminCopy: Boolean(options?.useAdminCopy),
+          pageRange: options?.pageRange,
+        }),
+      });
+      clearTimeout(timeoutId);
+
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && !contentType.includes('text/html') && !contentType.includes('application/json')) {
+        const blob = await res.blob();
+        if (blob && blob.size > 100) {
+          triggerBlobDownload(blob);
+          return true;
+        }
+      }
+
+      // Safely extract server error without throwing JSON parse error on HTML gateway pages
+      const errText = await res.text().catch(() => '');
+      if (errText && !errText.trim().startsWith('<')) {
+        try {
+          const parsed = JSON.parse(errText);
+          lastServerError = parsed.error || `خطای سرور (${res.status})`;
+        } catch {
+          lastServerError = `خطای سرور (${res.status})`;
+        }
+      } else {
+        lastServerError = `پاسخ نامعتبر از سرور (${res.status})`;
+      }
+
+      // Only fall through to inline payload if server returned 404/400 (book not saved in server DB)
+      if (res.status !== 404 && res.status !== 400 && res.status >= 400 && res.status < 500) {
+        throw new Error(lastServerError);
+      }
+    } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        lastServerError = 'زمان ساخت فایل Word در سرور به پایان رسید. پیشنهاد می‌شود کتاب را در دو بازه صفحه‌ای ذخیره کنید.';
+      } else if (err?.message && !lastServerError) {
+        lastServerError = err.message;
+      }
+      console.warn('Lightweight server docx request failed:', lastServerError);
+    }
   }
+
+  // 2. Inline Server Upload Path (only if size is safe < 6MB, e.g. unsaved samples/admin copy)
+  if (validChunks.length > 0 && (!hasServerBookId || options?.forceInline || lastServerError)) {
+    const groupedChapters = groupChunksIntoChapters(
+      project.chunks,
+      project.designConfig?.excludedChunkIds,
+      options?.pageRange
+    );
+    const totalInlineChars = groupedChapters.reduce((sum, ch) => sum + (ch.htmlContent?.length || 0), 0);
+
+    if (groupedChapters.length > 0 && totalInlineChars < 6_000_000) {
+      try {
+        const res = await fetch(resolveApiUrl('/api/export/docx'), {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            title: project.title || project.originalTitle || 'کتاب ترجمه شده',
+            author: project.author,
+            translator: project.translator || 'سامانه هوشمند ترجمه کتاب',
+            originalTitle: project.originalTitle,
+            chapters: groupedChapters.map(ch => ({
+              title: ch.title,
+              htmlContent: ch.htmlContent,
+            })),
+            designConfig: project.designConfig,
+          }),
+        });
+
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && !contentType.includes('text/html') && !contentType.includes('application/json')) {
+          const blob = await res.blob();
+          if (blob && blob.size > 100) {
+            triggerBlobDownload(blob);
+            return true;
+          }
+        }
+      } catch (inlineErr: any) {
+        console.warn('Inline server docx upload failed:', inlineErr?.message);
+      }
+    }
+  }
+
+  // 3. Safe Client Fallback (ONLY for small/medium books <= 40 chunks & < 3MB so Chrome NEVER crashes on >100-page books!)
+  const totalClientChars = validChunks.reduce((sum, c) => sum + (c.translatedHtml?.length || 0), 0);
+  if (validChunks.length > 0 && validChunks.length <= 40 && totalClientChars < 3_000_000) {
+    try {
+      const docx = await import('docx');
+      const doc = await buildClientDocxDocument(project);
+      const blob = await docx.Packer.toBlob(doc);
+      triggerBlobDownload(blob);
+      return true;
+    } catch (clientErr: any) {
+      console.error('Client docx generation failed:', clientErr);
+    }
+  }
+
+  throw new Error(
+    lastServerError ||
+      'خطا در تولید فایل Word برای کتاب حجیم. لطفاً اتصال سرور را بررسی کنید یا از بخش «بازه صفحات» کتاب را در چند بخش خروجی بگیرید.'
+  );
 }
 
 /**

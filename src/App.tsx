@@ -10,6 +10,8 @@ import { Navbar } from './components/Navbar.tsx';
 import { ProjectHeader } from './components/ProjectHeader.tsx';
 import { ChunkListSidebar } from './components/ChunkListSidebar.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
+import { PrintDocument } from './components/PrintDocument.tsx';
+import { prepareChaptersForPrintAsync, type GroupedChapter } from './utils/exporter.ts';
 
 // Code-split heavy views and modals for sub-second FCP and minimal bundle size
 const DedicatedAuthPage = React.lazy(() => import('./components/DedicatedAuthPage.tsx').then(m => ({ default: m.DedicatedAuthPage })));
@@ -27,7 +29,6 @@ const ProviderManagerModal = React.lazy(() => import('./components/ProviderManag
 const BooksLibraryModal = React.lazy(() => import('./components/BooksLibraryModal.tsx').then(m => ({ default: m.BooksLibraryModal })));
 const ExportDesignModal = React.lazy(() => import('./components/ExportDesignModal.tsx').then(m => ({ default: m.ExportDesignModal })));
 const TokenEstimatorModal = React.lazy(() => import('./components/TokenEstimatorModal.tsx').then(m => ({ default: m.TokenEstimatorModal })));
-const PrintDocument = React.lazy(() => import('./components/PrintDocument.tsx').then(m => ({ default: m.PrintDocument })));
 const AddPageModal = React.lazy(() => import('./components/AddPageModal.tsx').then(m => ({ default: m.AddPageModal })));
 import type { AddPagePayload } from './components/AddPageModal.tsx';
 
@@ -421,55 +422,130 @@ export default function App() {
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
 
-  // Dedicated Clean PDF Printing Handler with High-Capacity Page Preparation
+  // Dedicated Clean PDF Printing Handler with Cooperative High-Capacity Preparation
   const [isPrinting, setIsPrinting] = useState(false);
   const [isPreparingPrint, setIsPreparingPrint] = useState(false);
   const [printStatusMessage, setPrintStatusMessage] = useState('');
+  const [printTargetBook, setPrintTargetBook] = useState<BookProject | null>(null);
+  const [preparedPrintChapters, setPreparedPrintChapters] = useState<GroupedChapter[] | null>(null);
+  const [printPageRange, setPrintPageRange] = useState<{ start?: number; end?: number } | undefined>(undefined);
+  const printCancelRef = useRef(false);
+
+  const handleCancelPrintPrep = useCallback(() => {
+    printCancelRef.current = true;
+    setIsPreparingPrint(false);
+    setIsPrinting(false);
+    setPreparedPrintChapters(null);
+    setPrintTargetBook(null);
+    setPrintPageRange(undefined);
+  }, []);
 
   // Dynamically sets document.title to the current book's title during print,
-  // preventing the platform branding ("مترجم و ویراستار هوشمند کتاب...") from ever printing
-  // in the PDF header, and ensuring the saved PDF file has the clean book title.
-  const handlePrintPdf = useCallback(() => {
-    const chunkCount = project?.chunks?.length || 0;
-    const cleanTitle = project?.title?.trim() || 'کتاب';
+  // preventing the platform branding from printing in PDF headers, and cooperates
+  // asynchronously across large books so Chrome never pops "Page Unresponsive".
+  const handlePrintPdf = useCallback(async (options?: { pageRange?: { start?: number; end?: number }; book?: BookProject }) => {
+    const baseBook = options?.book || booksRef.current.find((b) => b.id === activeBookIdRef.current) || project;
+    if (!baseBook) return;
+
+    printCancelRef.current = false;
+    setIsPreparingPrint(true);
+    setPrintStatusMessage('درحال دریافت و آماده‌سازی بخش‌های کتاب...');
+
+    const needsLoad = !Array.isArray(baseBook.chunks) || baseBook.chunks.length === 0;
+    const loadedBook = (needsLoad ? await ensureBookChunksLoaded(baseBook, true) : baseBook) || baseBook;
+    if (printCancelRef.current) return;
+
+    const chunks = loadedBook.chunks || [];
+    const pageRange = options?.pageRange;
+    const targetCount = pageRange && (pageRange.start || pageRange.end)
+      ? Math.max(0, Math.min(chunks.length, pageRange.end || chunks.length) - Math.max(0, (pageRange.start || 1) - 1))
+      : chunks.length;
+
+    setPrintStatusMessage(`درحال پردازش و صفحه‌آرایی ${targetCount} بخش کتاب بدون افت سرعت مرورگر...`);
+
+    const prepared = await prepareChaptersForPrintAsync(chunks, {
+      excludedChunkIds: loadedBook.designConfig?.excludedChunkIds,
+      pageRange,
+      onProgress: (processed, total) => {
+        if (!printCancelRef.current) {
+          setPrintStatusMessage(`درحال پردازش صفحات کتاب (${processed} از ${total} بخش)...`);
+        }
+      },
+    });
+
+    if (printCancelRef.current) return;
+
+    if (prepared.length === 0) {
+      setIsPreparingPrint(false);
+      setPrintStatusMessage('هیچ صفحه ترجمه‌شده‌ای در این بازه برای چاپ وجود ندارد.');
+      setTimeout(() => setPrintStatusMessage(''), 3500);
+      return;
+    }
+
+    const cleanTitle = loadedBook.title?.trim() || 'کتاب';
     const previousTitle = document.title;
     document.title = cleanTitle;
 
-    setIsPreparingPrint(true);
-    setPrintStatusMessage(`درحال آماده‌سازی ${chunkCount} صفحه کتاب برای چاپ بدون افت سرعت...`);
+    setPrintTargetBook(loadedBook);
+    setPrintPageRange(pageRange);
+    setPreparedPrintChapters(prepared);
     setIsPrinting(true);
+    setPrintStatusMessage('درحال چیدمان نهایی صفحات و بارگذاری تصاویر...');
 
-    // Give browser sufficient layout time depending on book size (prevents Chrome Page Unresponsive popup)
-    const delay = chunkCount > 100 ? 900 : chunkCount > 40 ? 500 : 200;
+    // Allow React to paint PrintDocument into the DOM before invoking print()
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
-    requestAnimationFrame(() => {
-      setTimeout(() => {
-        setIsPreparingPrint(false);
-        try {
-          window.print();
-        } catch (e) {
-          console.error('Print failed:', e);
-        }
-      }, delay);
-    });
+    // Ensure embedded images are decoded before Chrome snapshots the print layout (capped at 3s)
+    const printRoot = document.querySelector('.print-doc-root');
+    if (printRoot) {
+      const imgs = Array.from(printRoot.querySelectorAll('img'));
+      if (imgs.length > 0) {
+        await Promise.race([
+          Promise.all(
+            imgs.map((img) =>
+              typeof img.decode === 'function' ? img.decode().catch(() => {}) : Promise.resolve()
+            )
+          ),
+          new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+        ]);
+      }
+    }
 
+    if (printCancelRef.current) return;
+
+    setIsPreparingPrint(false);
     setTimeout(() => {
-      document.title = previousTitle;
-    }, 4500);
-  }, [project?.title, project?.chunks?.length]);
+      try {
+        window.print();
+      } catch (e) {
+        console.error('Print failed:', e);
+        setIsPrinting(false);
+        setPreparedPrintChapters(null);
+        setPrintTargetBook(null);
+      } finally {
+        setTimeout(() => {
+          document.title = previousTitle;
+        }, 4500);
+      }
+    }, 60);
+  }, [project]);
 
   useEffect(() => {
     let savedTitle = document.title;
     const handleBeforePrint = () => {
       setIsPrinting(true);
       savedTitle = document.title;
-      if (project?.title?.trim()) {
-        document.title = project.title.trim();
+      const activeTitle = (printTargetBook || project)?.title?.trim();
+      if (activeTitle) {
+        document.title = activeTitle;
       }
     };
     const handleAfterPrint = () => {
       setIsPrinting(false);
       setIsPreparingPrint(false);
+      setPreparedPrintChapters(null);
+      setPrintTargetBook(null);
+      setPrintPageRange(undefined);
       if (savedTitle) {
         document.title = savedTitle;
       }
@@ -480,7 +556,7 @@ export default function App() {
       window.removeEventListener('beforeprint', handleBeforePrint);
       window.removeEventListener('afterprint', handleAfterPrint);
     };
-  }, [project?.title]);
+  }, [project?.title, printTargetBook]);
 
   const handleOpenCustomPage = (slug: string) => {
     setActiveCustomPageSlug(slug);
@@ -1106,22 +1182,27 @@ export default function App() {
     });
   };
 
-  // Exports (dynamically imported on user action to preserve instant initial page speed)
+  // Exports (lightweight bookId server DOCX generation prevents multi-MB chunk fetches & crashes)
   const handleExportDocx = async (targetBook: BookProject) => {
-    const fullBook = (await ensureBookChunksLoaded(targetBook, true)) || targetBook;
+    const isServerBook = Boolean(
+      targetBook.id && targetBook.id !== 'placeholder_book' && !targetBook.id.startsWith('sample_')
+    );
+    const fullBook = isServerBook
+      ? targetBook
+      : (await ensureBookChunksLoaded(targetBook, true)) || targetBook;
     handleSelectBook(fullBook);
     const { downloadDocx } = await import('./utils/exporter.ts');
     await downloadDocx(fullBook);
   };
 
   const handleExportPdf = async (targetBook: BookProject) => {
-    const fullBook = (await ensureBookChunksLoaded(targetBook, true)) || targetBook;
+    const fullBook = (await ensureBookChunksLoaded(targetBook, false)) || targetBook;
     handleSelectBook(fullBook);
     setIsDesignModalOpen(true);
   };
 
   const handleExportEpub = async (targetBook: BookProject) => {
-    const fullBook = (await ensureBookChunksLoaded(targetBook, true)) || targetBook;
+    const fullBook = (await ensureBookChunksLoaded(targetBook, false)) || targetBook;
     handleSelectBook(fullBook);
     const { downloadStyledHtml } = await import('./utils/exporter.ts');
     downloadStyledHtml(fullBook);
@@ -1551,85 +1632,126 @@ export default function App() {
     ? `نرخ همکار ناشر (${Math.round(costPerWord * 0.65)} ت)`
     : `نرخ عمومی (${costPerWord} ت)`;
 
+  const printLayer = (
+    <>
+      {isPrinting && (printTargetBook || project) && (
+        <PrintDocument
+          project={printTargetBook || project}
+          preparedChapters={preparedPrintChapters}
+          pageRange={printPageRange}
+        />
+      )}
+
+      {isPreparingPrint && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/85 backdrop-blur-md no-print p-4">
+          <div className="bg-slate-900 border border-amber-500/40 p-6 sm:p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-4 max-w-md text-center">
+            <div className="w-14 h-14 rounded-full border-4 border-amber-500/20 border-t-amber-500 animate-spin" />
+            <div className="space-y-1">
+              <h3 className="font-bold text-white text-base sm:text-lg">درحال آماده‌سازی صفحات کتاب برای چاپ و PDF</h3>
+              <p className="text-xs text-slate-300 leading-relaxed">{printStatusMessage}</p>
+            </div>
+            <div className="flex items-center gap-2 text-[11px] text-amber-400 bg-amber-500/10 px-3.5 py-1.5 rounded-full border border-amber-500/25 font-medium">
+              <span>✓ بهینه‌سازی خودکار حافظه و جلوگیری از خطای هنگ مرورگر</span>
+            </div>
+            <button
+              type="button"
+              onClick={handleCancelPrintPrep}
+              className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700 transition"
+            >
+              انصراف
+            </button>
+          </div>
+        </div>
+      )}
+    </>
+  );
+
   // ========================================================
   // VIEW: USER DASHBOARD (میز کاربری)
   // ========================================================
   if (currentView === 'dashboard') {
     return (
-      <Suspense fallback={viewFallback}>
-        {paymentNotice && (
-          <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 sticky top-0 z-40">
-            <div className={`max-w-5xl mx-auto p-3.5 rounded-2xl flex items-center justify-between text-xs font-semibold ${
-              paymentNotice.type === 'success'
-                ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300'
-                : 'bg-rose-500/15 border border-rose-500/30 text-rose-300'
-            }`}>
-              <div className="flex items-center gap-2">
-                <span>{paymentNotice.message}</span>
+      <>
+        {printLayer}
+        <div className="no-print">
+          <Suspense fallback={viewFallback}>
+            {paymentNotice && (
+              <div className="bg-slate-900 border-b border-slate-800 px-4 py-3 sticky top-0 z-40">
+                <div className={`max-w-5xl mx-auto p-3.5 rounded-2xl flex items-center justify-between text-xs font-semibold ${
+                  paymentNotice.type === 'success'
+                    ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300'
+                    : 'bg-rose-500/15 border border-rose-500/30 text-rose-300'
+                }`}>
+                  <div className="flex items-center gap-2">
+                    <span>{paymentNotice.message}</span>
+                  </div>
+                  <button
+                    onClick={() => setPaymentNotice(null)}
+                    className="px-2 py-1 rounded-lg bg-slate-950/60 hover:bg-slate-950 text-slate-300 text-[11px]"
+                  >
+                    بستن پیام
+                  </button>
+                </div>
               </div>
-              <button
-                onClick={() => setPaymentNotice(null)}
-                className="px-2 py-1 rounded-lg bg-slate-950/60 hover:bg-slate-950 text-slate-300 text-[11px]"
-              >
-                بستن پیام
-              </button>
-            </div>
-          </div>
-        )}
-        <UserDashboard
-          user={currentUser}
-          books={books.filter((b) => (!b.userId || b.userId === currentUser.id) && b.title !== 'کتاب بازیابی شده' && b.originalTitle !== 'Recovered Book')}
-          activeJobs={activeJobs}
-          costPerWord={userEffectiveRate}
-          onOpenNewBook={() => setIsNewBookModalOpen(true)}
-          onSelectBook={(selected) => {
-            handleSelectBook(selected, 'workspace');
-          }}
-          onOpenWallet={() => setIsWalletModalOpen(true)}
-          onOpenAdmin={(currentUser.role === 'admin' || currentUser.role === 'staff') ? () => setCurrentView('admin') : undefined}
-          onLogout={handleLogout}
-          onDeleteBook={handleDeleteBook}
-          onStartTranslation={handleStartDraftTranslation}
-          onExportDocx={handleExportDocx}
-          onExportPdf={handleExportPdf}
-          onExportEpub={handleExportEpub}
-          onRefresh={() => {
-            if (authToken) {
-              fetchActiveJobs(authToken);
-              fetchUserBooks(authToken);
-            }
-          }}
-        />
+            )}
+            <UserDashboard
+              user={currentUser}
+              books={books.filter((b) => (!b.userId || b.userId === currentUser.id) && b.title !== 'کتاب بازیابی شده' && b.originalTitle !== 'Recovered Book')}
+              activeJobs={activeJobs}
+              costPerWord={userEffectiveRate}
+              onOpenNewBook={() => setIsNewBookModalOpen(true)}
+              onSelectBook={(selected) => {
+                handleSelectBook(selected, 'workspace');
+              }}
+              onOpenWallet={() => setIsWalletModalOpen(true)}
+              onOpenAdmin={(currentUser.role === 'admin' || currentUser.role === 'staff') ? () => setCurrentView('admin') : undefined}
+              onLogout={handleLogout}
+              onDeleteBook={handleDeleteBook}
+              onStartTranslation={handleStartDraftTranslation}
+              onExportDocx={handleExportDocx}
+              onExportPdf={handleExportPdf}
+              onExportEpub={handleExportEpub}
+              onRefresh={() => {
+                if (authToken) {
+                  fetchActiveJobs(authToken);
+                  fetchUserBooks(authToken);
+                }
+              }}
+            />
 
-        <WalletModal
-          isOpen={isWalletModalOpen}
-          user={currentUser}
-          onClose={() => setIsWalletModalOpen(false)}
-          onBalanceUpdated={(newBalance) => {
-            setCurrentUser({ ...currentUser, walletBalance: newBalance });
-          }}
-        />
+            <WalletModal
+              isOpen={isWalletModalOpen}
+              user={currentUser}
+              onClose={() => setIsWalletModalOpen(false)}
+              onBalanceUpdated={(newBalance) => {
+                setCurrentUser({ ...currentUser, walletBalance: newBalance });
+              }}
+            />
 
-        <NewBookModal
-          isOpen={isNewBookModalOpen}
-          onClose={() => setIsNewBookModalOpen(false)}
-          onCreateProject={handleCreateBook}
-          defaultModel="gemini-3.8-flash"
-          walletBalance={currentUser.walletBalance}
-          costPerWord={userEffectiveRate}
-          tierLabel={userTierLabel}
-          discountPercent={currentUser.discountPercent}
-          onOpenWallet={() => setIsWalletModalOpen(true)}
-        />
+            <NewBookModal
+              isOpen={isNewBookModalOpen}
+              onClose={() => setIsNewBookModalOpen(false)}
+              onCreateProject={handleCreateBook}
+              defaultModel="gemini-3.8-flash"
+              walletBalance={currentUser.walletBalance}
+              costPerWord={userEffectiveRate}
+              tierLabel={userTierLabel}
+              discountPercent={currentUser.discountPercent}
+              onOpenWallet={() => setIsWalletModalOpen(true)}
+            />
 
-        <ExportDesignModal
-          isOpen={isDesignModalOpen}
-          onClose={() => setIsDesignModalOpen(false)}
-          project={project}
-          onUpdateDesign={(config) => handleUpdateProject({ ...project, designConfig: config })}
-          onPrintPdf={handlePrintPdf}
-        />
-      </Suspense>
+            <ExportDesignModal
+              isOpen={isDesignModalOpen}
+              onClose={() => setIsDesignModalOpen(false)}
+              project={project}
+              onUpdateDesign={(config) => handleUpdateProject({ ...project, designConfig: config })}
+              onPrintPdf={(pageRange) => handlePrintPdf({ pageRange })}
+              onUpdateProject={handleUpdateProject}
+              onDeleteChunk={handleDeleteChunk}
+            />
+          </Suspense>
+        </div>
+      </>
     );
   }
 
@@ -1675,27 +1797,11 @@ export default function App() {
       showHomeButton={true}
       onNavigateHome={() => setCurrentView('dashboard')}
     >
+      {/* Print layer rendered statically outside Suspense so activating print NEVER unmounts UI into dark loading spinner */}
+      {printLayer}
+
       <Suspense fallback={viewFallback}>
         <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-['Vazirmatn'] selection:bg-amber-500/30">
-          {/* Printable Document for high-res PDF generation - only mounted when printing to save CPU & memory */}
-          {isPrinting && <PrintDocument project={project} />}
-
-          {/* High-Capacity Print Preparation Overlay (Smooth UX for books with 100-500+ pages) */}
-          {isPreparingPrint && (
-            <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/85 backdrop-blur-md no-print p-4">
-              <div className="bg-slate-900 border border-amber-500/40 p-6 sm:p-8 rounded-3xl shadow-2xl flex flex-col items-center gap-4 max-w-md text-center">
-                <div className="w-14 h-14 rounded-full border-4 border-amber-500/20 border-t-amber-500 animate-spin" />
-                <div className="space-y-1">
-                  <h3 className="font-bold text-white text-base sm:text-lg">درحال آماده‌سازی صفحات کتاب برای چاپ و PDF</h3>
-                  <p className="text-xs text-slate-300 leading-relaxed">{printStatusMessage}</p>
-                </div>
-                <div className="flex items-center gap-2 text-[11px] text-amber-400 bg-amber-500/10 px-3.5 py-1.5 rounded-full border border-amber-500/25 font-medium">
-                  <span>✓ بهینه‌سازی خودکار حافظه و جلوگیری از خطای هنگ مرورگر</span>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Main Studio Interactive UI */}
           <div className="no-print flex flex-col min-h-screen">
         <Navbar
@@ -1705,7 +1811,7 @@ export default function App() {
           onOpenNewBookModal={() => setIsNewBookModalOpen(true)}
           onOpenGlossaryModal={() => setIsGlossaryModalOpen(true)}
           onLoadSampleBook={handleLoadSampleBook}
-          onPrintPdf={handlePrintPdf}
+          onPrintPdf={() => handlePrintPdf()}
           onOpenLibraryModal={() => setIsLibraryModalOpen(true)}
           booksCount={books.length}
           onOpenProvidersModal={() => setIsProvidersModalOpen(true)}
@@ -1878,7 +1984,7 @@ export default function App() {
         onClose={() => setIsDesignModalOpen(false)}
         project={project}
         onUpdateDesign={(config) => handleUpdateProject({ ...project, designConfig: config })}
-        onPrintPdf={handlePrintPdf}
+        onPrintPdf={(pageRange) => handlePrintPdf({ pageRange })}
         onUpdateProject={handleUpdateProject}
         onDeleteChunk={handleDeleteChunk}
       />
@@ -1916,6 +2022,7 @@ export default function App() {
         onDeleteBook={handleDeleteBook}
         onOpenNewBookModal={() => setIsNewBookModalOpen(true)}
         onExportPdf={(book) => handleExportPdf(book)}
+        onExportDocx={(book) => handleExportDocx(book)}
       />
 
       {isAddPageModalOpen && (

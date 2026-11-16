@@ -890,48 +890,51 @@ export function AdminPanel({ currentUser, onBackToUserPanel, onLogout, onCostPer
 
   // Download standard DOCX format (supports admin private copy when present)
   const handleDownloadWordDocx = async (book: any) => {
-    const fullBook = await fetchBookDetailsIfNeeded(book);
-    const sourceData = (fullBook.hasAdminCopy && fullBook.adminCopy) ? fullBook.adminCopy : fullBook;
-    const title = sourceData.title || fullBook.title || 'کتاب ترجمه شده';
-    const chunks = sourceData.chunks || fullBook.chunks || [];
-
+    const title = (book.hasAdminCopy && book.adminCopy?.title) || book.title || 'کتاب ترجمه شده';
     const projectForExport = {
-      id: fullBook.id,
+      id: book.id,
       title,
-      originalTitle: sourceData.originalTitle || fullBook.originalTitle || '',
-      author: sourceData.author || fullBook.author || '',
-      translator: sourceData.translator || fullBook.translator || 'سامانه هوشمند ترجمه کتاب',
-      chunks: chunks.map((c: any) => ({
-        id: c.id,
-        chapterNumber: c.chapterNumber,
-        chapterTitle: c.chapterTitle || c.title || `بخش ${c.chunkNumber || 1}`,
-        chunkNumber: c.chunkNumber || 1,
-        englishText: c.englishText || '',
-        translatedHtml: c.translatedHtml || c.translatedText || '',
-        status: 'completed' as const,
-        wordCount: c.wordCount || 0,
-        estimatedTokens: 0,
-      })),
-      glossary: fullBook.glossary || [],
+      originalTitle: book.originalTitle || '',
+      author: book.author || '',
+      translator: book.translator || 'سامانه هوشمند ترجمه کتاب',
+      completedChunks: book.completedChunks ?? (Array.isArray(book.chunks) ? book.chunks.filter((c: any) => c.translatedHtml).length : 0),
+      hasAdminCopy: Boolean(book.hasAdminCopy),
+      chunks: Array.isArray(book.chunks)
+        ? book.chunks.map((c: any) => ({
+            id: c.id,
+            chapterNumber: c.chapterNumber,
+            chapterTitle: c.chapterTitle || c.title || `بخش ${c.chunkNumber || 1}`,
+            chunkNumber: c.chunkNumber || 1,
+            englishText: c.englishText || '',
+            translatedHtml: c.translatedHtml || c.translatedText || '',
+            status: 'completed' as const,
+            wordCount: c.wordCount || 0,
+            estimatedTokens: 0,
+          }))
+        : [],
+      glossary: book.glossary || [],
       model: 'standard',
       tone: 'formal' as any,
-      createdAt: fullBook.createdAt || Date.now(),
+      createdAt: book.createdAt || Date.now(),
       updatedAt: Date.now(),
       designConfig: {
-        textAlignment: 'right' as const,
-        fontFamily: 'Vazirmatn Medium',
-        themeId: 'spiritual' as any,
-        showHeader: true,
-        showFooter: true,
-        headerText: title,
-        footerText: fullBook.hasAdminCopy ? 'نسخه اختصاصی ویرایش مدیریت' : 'سامانه هوشمند ترجمه کتاب',
+        ...(book.designConfig || {}),
+        textAlignment: book.designConfig?.textAlignment || ('right' as const),
+        fontFamily: book.designConfig?.fontFamily || 'Vazirmatn Medium',
+        themeId: book.designConfig?.themeId || ('spiritual' as any),
+        showHeader: book.designConfig?.showHeader ?? true,
+        showFooter: book.designConfig?.showFooter ?? true,
+        headerText: book.designConfig?.headerText || title,
+        footerText: book.hasAdminCopy ? 'نسخه اختصاصی ویرایش مدیریت' : (book.designConfig?.footerText || 'سامانه هوشمند ترجمه کتاب'),
       },
     };
 
     try {
-      await downloadDocx(projectForExport as any);
+      await downloadDocx(projectForExport as any, {
+        useAdminCopy: Boolean(book.hasAdminCopy),
+      });
     } catch (err: any) {
-      alert(`خطا در دانلود فایل Word (.docx): ${err.message}`);
+      console.error('Admin DOCX export error:', err);
     }
   };
 

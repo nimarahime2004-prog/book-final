@@ -40,7 +40,7 @@ interface ExportDesignModalProps {
   onClose: () => void;
   project: BookProject;
   onUpdateDesign: (config: BookDesignConfig) => void;
-  onPrintPdf: () => void;
+  onPrintPdf: (pageRange?: { start?: number; end?: number }) => void;
   onUpdateProject?: (updated: BookProject) => void;
   onDeleteChunk?: (chunkId: string) => void;
 }
@@ -184,7 +184,13 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
   const [activeTab, setActiveTab] = useState<'themes' | 'cover' | 'colors' | 'headers' | 'typography' | 'pages'>('themes');
   const [isExportingDocx, setIsExportingDocx] = useState(false);
   const [savedBanner, setSavedBanner] = useState<string | null>(null);
+  const [bannerStatus, setBannerStatus] = useState<'info' | 'success' | 'error'>('success');
   const [isFullScreenPreview, setIsFullScreenPreview] = useState(false);
+
+  const totalBookChunks = (project.chunks || []).length;
+  const [usePageRange, setUsePageRange] = useState(false);
+  const [rangeStart, setRangeStart] = useState<number>(1);
+  const [rangeEnd, setRangeEnd] = useState<number>(Math.min(100, totalBookChunks || 100));
 
   if (!isOpen) return null;
 
@@ -357,30 +363,43 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
     }
   };
 
+  const getActivePageRange = (): { start?: number; end?: number } | undefined => {
+    if (!usePageRange || totalBookChunks === 0) return undefined;
+    const s = Math.max(1, Math.min(totalBookChunks, Number(rangeStart) || 1));
+    const e = Math.max(s, Math.min(totalBookChunks, Number(rangeEnd) || totalBookChunks));
+    return { start: s, end: e };
+  };
+
   const handlePrint = () => {
     handleApplyConfig();
+    const activeRange = getActivePageRange();
     onClose();
     setTimeout(() => {
-      onPrintPdf();
-    }, 250);
+      onPrintPdf(activeRange);
+    }, 120);
   };
 
   const handleDownloadDocx = async () => {
     setIsExportingDocx(true);
+    setBannerStatus('info');
     setSavedBanner('درحال ارتباط با سرور و تولید سند Word (.docx) بدون افت سرعت مرورگر...');
+    let success = false;
     try {
       const cfg = handleApplyConfig();
       const updatedProject = { ...project, designConfig: cfg };
-      const success = await downloadDocx(updatedProject);
+      const activeRange = getActivePageRange();
+      success = await downloadDocx(updatedProject, { pageRange: activeRange });
       if (success) {
+        setBannerStatus('success');
         setSavedBanner(`✓ فایل رسمی Word (.docx) با قلم ${fontFamily} و ساختار کامل کتاب دانلود شد.`);
       }
     } catch (err: any) {
       console.error('Word export error:', err);
-      setSavedBanner('خطا در ایجاد سند Word. لطفاً مجدداً امتحان کنید.');
+      setBannerStatus('error');
+      setSavedBanner(err?.message || 'خطا در ایجاد سند Word. لطفاً مجدداً امتحان کنید.');
     } finally {
       setIsExportingDocx(false);
-      setTimeout(() => setSavedBanner(null), 4500);
+      setTimeout(() => setSavedBanner(null), success ? 4500 : 7000);
     }
   };
 
@@ -2255,8 +2274,24 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
 
             {/* Notification Banner */}
             {savedBanner && (
-              <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 p-3 rounded-2xl text-xs flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <div
+                className={`p-3 rounded-2xl text-xs flex items-center gap-2 border ${
+                  bannerStatus === 'error'
+                    ? 'bg-rose-500/15 border-rose-500/35 text-rose-200'
+                    : bannerStatus === 'info'
+                    ? 'bg-blue-500/15 border-blue-500/30 text-blue-200'
+                    : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-300'
+                }`}
+              >
+                <CheckCircle2
+                  className={`w-4 h-4 shrink-0 ${
+                    bannerStatus === 'error'
+                      ? 'text-rose-400'
+                      : bannerStatus === 'info'
+                      ? 'text-blue-400'
+                      : 'text-emerald-400'
+                  }`}
+                />
                 <span>{savedBanner}</span>
               </div>
             )}
@@ -2584,12 +2619,100 @@ export const ExportDesignModal: React.FC<ExportDesignModalProps> = ({
 
         {/* Modal Action Footer */}
         <div className="px-6 py-4 bg-slate-850 border-t border-slate-800 flex flex-col gap-3">
-          {(project.chunks || []).length >= 50 && (
-            <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/25 px-3.5 py-2 rounded-xl text-[11px] text-blue-300">
-              <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-              <span>
-                این کتاب دارای <strong>{project.chunks.length} صفحه</strong> است. موتور خروجی <strong>Word (.docx)</strong> به صورت مستقیم به سرور متصل شده و تمام صفحات را بدون اشغال رم مرورگر در چند ثانیه دانلود می‌کند. خروجی <strong>PDF</strong> نیز با بهینه‌سازی حافظه آماده چاپ است.
-              </span>
+          {savedBanner && (
+            <div
+              className={`px-3.5 py-2 rounded-xl text-xs flex items-center gap-2 border ${
+                bannerStatus === 'error'
+                  ? 'bg-rose-500/15 border-rose-500/35 text-rose-200'
+                  : bannerStatus === 'info'
+                  ? 'bg-blue-500/15 border-blue-500/30 text-blue-200'
+                  : 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300'
+              }`}
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>{savedBanner}</span>
+            </div>
+          )}
+
+          {totalBookChunks >= 50 && (
+            <div className="flex flex-col gap-2.5 bg-blue-500/10 border border-blue-500/25 px-3.5 py-2.5 rounded-xl text-[11px] text-blue-200">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>
+                    این کتاب دارای <strong>{totalBookChunks} بخش</strong> است. برای جلوگیری از فشار روی مرورگر هنگام چاپ PDF می‌توانید خروجی را به‌صورت بازه‌های صفحه‌ای هم بگیرید:
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 bg-slate-900/90 p-1 rounded-lg border border-slate-700">
+                  <button
+                    type="button"
+                    onClick={() => setUsePageRange(false)}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold transition ${
+                      !usePageRange ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    کل کتاب ({totalBookChunks} بخش)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUsePageRange(true)}
+                    className={`px-2.5 py-1 rounded text-[11px] font-bold transition ${
+                      usePageRange ? 'bg-amber-500 text-slate-950' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    انتخاب بازه صفحات
+                  </button>
+                </div>
+              </div>
+
+              {usePageRange && (
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-blue-500/20">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {Array.from({ length: Math.min(8, Math.ceil(totalBookChunks / 100)) }).map((_, partIdx) => {
+                      const start = partIdx * 100 + 1;
+                      const end = Math.min(totalBookChunks, (partIdx + 1) * 100);
+                      const isActive = rangeStart === start && rangeEnd === end;
+                      return (
+                        <button
+                          key={start}
+                          type="button"
+                          onClick={() => {
+                            setRangeStart(start);
+                            setRangeEnd(end);
+                          }}
+                          className={`px-2 py-0.5 rounded-md font-mono text-[10px] border transition ${
+                            isActive
+                              ? 'bg-amber-500/25 border-amber-400 text-amber-200 font-bold'
+                              : 'bg-slate-900/70 border-slate-700 text-slate-300 hover:border-slate-500'
+                          }`}
+                        >
+                          {start} تا {end}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-slate-300">از بخش:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={totalBookChunks}
+                      value={rangeStart}
+                      onChange={e => setRangeStart(Math.max(1, Number(e.target.value) || 1))}
+                      className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-center text-white font-mono text-xs"
+                    />
+                    <span className="text-slate-300">تا:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={totalBookChunks}
+                      value={rangeEnd}
+                      onChange={e => setRangeEnd(Math.min(totalBookChunks, Math.max(1, Number(e.target.value) || totalBookChunks)))}
+                      className="w-16 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-center text-white font-mono text-xs"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

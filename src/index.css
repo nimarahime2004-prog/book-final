@@ -268,20 +268,16 @@
 /* Print / PDF generation styles */
 @page {
   size: A4 portrait;
-  margin: 0mm !important; /* Setting margin to 0 completely removes browser URL, title, date and timestamps */
-  @top-left { content: none !important; }
-  @top-center { content: none !important; }
-  @top-right { content: none !important; }
-  @bottom-left { content: none !important; }
-  @bottom-center { content: none !important; }
-  @bottom-right { content: none !important; }
+  margin: 0mm; /* Removes default browser header/footer URLs; PrintDocument injects exact dynamic @page margins */
+  @top-left { content: none; }
+  @top-center { content: none; }
+  @top-right { content: none; }
+  @bottom-left { content: none; }
+  @bottom-center { content: none; }
+  @bottom-right { content: none; }
 }
 
 @media print {
-  @page {
-    size: A4 portrait;
-    margin: 0mm !important;
-  }
   *, *:before, *:after {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
@@ -292,7 +288,9 @@
     margin: 0 !important;
     padding: 0 !important;
     width: 100% !important;
-    min-height: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
     background-color: var(--print-page-bg, #faf8f5) !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
@@ -302,10 +300,13 @@
     display: none !important;
   }
 
-  .print-only {
+  .print-only,
+  .print-doc-root {
     display: block !important;
     width: 100% !important;
-    min-height: 100vh !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
     background-color: var(--print-page-bg, #faf8f5) !important;
     padding: 0 !important;
     box-sizing: border-box !important;
@@ -313,7 +314,8 @@
     print-color-adjust: exact !important;
   }
 
-  .book-page {
+  .book-page,
+  .book-cover-page {
     page-break-after: always;
     break-after: page;
   }
@@ -328,7 +330,27 @@
     break-before: page;
   }
 
-  .book-illustration-figure, .book-embedded-image {
+  .book-render-section {
+    page-break-inside: auto;
+    break-inside: auto;
+  }
+
+  .book-render-content h1,
+  .book-render-content h2,
+  .book-render-content h3 {
+    page-break-after: avoid;
+    break-after: avoid;
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  .book-render-content p {
+    orphans: 2;
+    widows: 2;
+  }
+
+  .book-illustration-figure,
+  .book-embedded-image {
     page-break-inside: avoid !important;
     break-inside: avoid !important;
   }
@@ -346,31 +368,12 @@
     image-rendering: auto !important;
   }
 
-  table.print-doc-table {
-    width: 100% !important;
-    max-width: 100% !important;
-    border-collapse: collapse !important;
-    table-layout: fixed !important;
-  }
-
   .book-page-content-wrapper {
     box-sizing: border-box !important;
     width: 100% !important;
     max-width: 100% !important;
     overflow-wrap: break-word !important;
     word-break: normal !important;
-  }
-
-  thead.print-table-header {
-    display: table-header-group !important;
-  }
-
-  tfoot.print-table-footer {
-    display: table-footer-group !important;
-  }
-
-  tbody.print-table-body tr {
-    page-break-inside: auto !important;
   }
 }
 

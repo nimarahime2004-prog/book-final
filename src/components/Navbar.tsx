@@ -60,6 +60,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [showSamplesMenu, setShowSamplesMenu] = useState(false);
   const [showMobileMenu, setShowMobileMenu] = useState(false);
   const [isExportingDocx, setIsExportingDocx] = useState(false);
+  const [docxError, setDocxError] = useState<string | null>(null);
 
   const chunks = currentProject?.chunks || [];
   const completedChunks = chunks.filter(c => c.translatedHtml).length;
@@ -67,9 +68,15 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const handleDocxExport = async () => {
     setIsExportingDocx(true);
-    await downloadDocx(currentProject);
-    setIsExportingDocx(false);
-    setShowExportMenu(false);
+    setDocxError(null);
+    try {
+      await downloadDocx(currentProject);
+      setShowExportMenu(false);
+    } catch (err: any) {
+      setDocxError(err?.message || 'خطا در ساخت فایل Word');
+    } finally {
+      setIsExportingDocx(false);
+    }
   };
 
   return (
@@ -285,6 +292,12 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <div className="px-3 py-1.5 text-xs font-semibold text-slate-400 border-b border-slate-700">
                   فرمت‌های استاندارد خروجی:
                 </div>
+
+                {docxError && (
+                  <div className="mx-3 my-2 p-2 rounded-lg bg-rose-500/15 border border-rose-500/40 text-rose-200 text-[11px] leading-relaxed">
+                    {docxError}
+                  </div>
+                )}
 
                 {/* Design Studio Trigger */}
                 <button

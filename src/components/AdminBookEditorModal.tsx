@@ -240,6 +240,8 @@ export function AdminBookEditorModal({
       originalTitle: originalTitle || '',
       author: author || '',
       translator: translator || 'مدیریت سامانه',
+      completedChunks: chunks.filter((c) => Boolean(c.translatedHtml && c.translatedHtml.trim())).length,
+      hasAdminCopy: hasExistingCopy,
       chunks: chunks.map((c) => ({
         id: c.id,
         chapterNumber: c.chapterNumber,
@@ -268,19 +270,30 @@ export function AdminBookEditorModal({
     };
 
     try {
-      await downloadDocx(projectForExport as any);
+      // Save or use saved admin copy on server if already persisted; otherwise pass inline if small
+      await downloadDocx(projectForExport as any, {
+        useAdminCopy: hasExistingCopy,
+      });
     } catch (e: any) {
-      alert(`خطا در دانلود فایل ورد: ${e.message}`);
+      console.error('Admin editor DOCX error:', e);
     }
   };
 
-  // Print PDF from current admin copy
+  // Print PDF from current admin copy using a hidden iframe (iframe-safe, never blocked by popup blockers)
   const handlePrintPdfFromAdminCopy = () => {
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) {
-      alert('لطفاً اجازه باز شدن پنجره پاپ‌آپ چاپ را صادر فرمایید.');
-      return;
-    }
+    const existingFrame = document.getElementById('admin-print-iframe');
+    if (existingFrame) existingFrame.remove();
+
+    const iframe = document.createElement('iframe');
+    iframe.id = 'admin-print-iframe';
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.style.visibility = 'hidden';
+    document.body.appendChild(iframe);
 
     const chaptersHtml = chunks
       .map(
@@ -298,7 +311,11 @@ export function AdminBookEditorModal({
       )
       .join('\n');
 
-    printWindow.document.write(`
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!doc) return;
+
+    doc.open();
+    doc.write(`
       <!DOCTYPE html>
       <html dir="rtl" lang="fa">
       <head>
@@ -321,18 +338,19 @@ export function AdminBookEditorModal({
             text-align: center;
             padding: 80px 20px;
             page-break-after: always;
+            break-after: page;
           }
           h1 { font-size: 26pt; color: #0f172a; margin-bottom: 12px; }
           .meta { font-size: 13pt; color: #64748b; margin-top: 8px; }
           .badge { display: inline-block; padding: 4px 12px; background: #e0e7ff; color: #4338ca; border-radius: 9999px; font-size: 10pt; font-weight: bold; margin-top: 20px; }
-          .chapter-page { page-break-before: always; padding-top: 20px; }
-          .chapter-header { border-bottom: 2px solid #e2e8f0; padding-bottom: 12px; margin-bottom: 24px; }
+          .chapter-page { margin-top: 24px; padding-top: 12px; }
+          .chapter-header { border-bottom: 2px solid #e2e8f0; padding-bottom: 10px; margin-bottom: 18px; break-after: avoid; }
           .chap-num { font-size: 11pt; color: #b45309; font-weight: bold; }
           .chap-title { font-size: 18pt; color: #1e3a8a; margin: 4px 0 0 0; }
           .chapter-body { text-align: right; }
-          .chapter-body p { margin-bottom: 18px; }
-          .chapter-body h1, .chapter-body h2, .chapter-body h3 { text-align: right; }
-          img { max-width: 90%; height: auto; display: block; margin: 20px auto; border-radius: 8px; }
+          .chapter-body p { margin-bottom: 16px; }
+          .chapter-body h1, .chapter-body h2, .chapter-body h3 { text-align: right; break-after: avoid; }
+          img { max-width: 85%; max-height: 360px; object-fit: contain; height: auto; display: block; margin: 16px auto; border-radius: 8px; break-inside: avoid; }
           @media print {
             body { padding: 0; }
             .no-print { display: none; }
@@ -348,15 +366,23 @@ export function AdminBookEditorModal({
           <div class="badge">نسخه اختصاصی ویرایش مدیریت سامانه</div>
         </div>
         ${chaptersHtml}
-        <script>
-          window.onload = function() {
-            window.print();
-          };
-        </script>
       </body>
       </html>
     `);
-    printWindow.document.close();
+    doc.close();
+
+    setTimeout(() => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } catch (err) {
+        console.error('Admin iframe print failed:', err);
+      } finally {
+        setTimeout(() => {
+          iframe.remove();
+        }, 60000);
+      }
+    }, 350);
   };
 
   return (

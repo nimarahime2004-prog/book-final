@@ -26,6 +26,7 @@ interface BooksLibraryModalProps {
   onDeleteBook: (id: string) => void;
   onOpenNewBookModal: () => void;
   onExportPdf?: (book: BookProject) => void;
+  onExportDocx?: (book: BookProject) => Promise<void> | void;
 }
 
 export const BooksLibraryModal: React.FC<BooksLibraryModalProps> = ({
@@ -37,10 +38,30 @@ export const BooksLibraryModal: React.FC<BooksLibraryModalProps> = ({
   onDeleteBook,
   onOpenNewBookModal,
   onExportPdf,
+  onExportDocx,
 }) => {
   const [search, setSearch] = useState('');
+  const [exportingBookId, setExportingBookId] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   if (!isOpen) return null;
+
+  const handleDocxClick = async (book: BookProject) => {
+    if (exportingBookId) return;
+    setExportError(null);
+    setExportingBookId(book.id);
+    try {
+      if (onExportDocx) {
+        await onExportDocx(book);
+      } else {
+        await downloadDocx(book);
+      }
+    } catch (err: any) {
+      setExportError(err?.message || 'خطا در ایجاد فایل Word (.docx)');
+    } finally {
+      setExportingBookId(null);
+    }
+  };
 
   const filteredBooks = books.filter(b => {
     if (!search.trim()) return true;
@@ -109,6 +130,18 @@ export const BooksLibraryModal: React.FC<BooksLibraryModalProps> = ({
 
         {/* Books Grid */}
         <div className="p-6 overflow-y-auto flex-1">
+          {exportError && (
+            <div className="mb-4 p-3 rounded-xl bg-rose-500/15 border border-rose-500/35 text-rose-200 text-xs flex items-center justify-between gap-2">
+              <span>{exportError}</span>
+              <button
+                type="button"
+                onClick={() => setExportError(null)}
+                className="px-2 py-0.5 rounded bg-rose-950/60 hover:bg-rose-950 text-[11px]"
+              >
+                بستن
+              </button>
+            </div>
+          )}
           {filteredBooks.length === 0 ? (
             <div className="py-16 text-center text-slate-500 text-xs">
               کتابی در قفسه یافت نشد. می‌توانید با دکمه بالا یک کتاب جدید اضافه کنید.
@@ -181,13 +214,13 @@ export const BooksLibraryModal: React.FC<BooksLibraryModalProps> = ({
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              downloadDocx(book);
+                              handleDocxClick(book);
                             }}
-                            disabled={completedChunks === 0}
+                            disabled={completedChunks === 0 || exportingBookId === book.id}
                             className="p-1 rounded text-slate-400 hover:text-blue-400 transition disabled:opacity-30"
-                            title="دانلود فایل Word این کتاب"
+                            title={exportingBookId === book.id ? 'درحال ساخت فایل Word...' : 'دانلود فایل Word این کتاب'}
                           >
-                            <FileText className="w-3.5 h-3.5" />
+                            <FileText className={`w-3.5 h-3.5 ${exportingBookId === book.id ? 'animate-pulse text-blue-400' : ''}`} />
                           </button>
 
                           {onExportPdf && (

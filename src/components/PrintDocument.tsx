@@ -1,22 +1,35 @@
 import React, { useEffect, useMemo } from 'react';
 import { BookProject } from '../types.ts';
 import { BOOK_THEMES, DEFAULT_DESIGN_CONFIG } from '../constants/themes.ts';
-import { groupChunksIntoChapters } from '../utils/exporter.ts';
+import { groupChunksIntoChapters, type GroupedChapter } from '../utils/exporter.ts';
 
 interface PrintDocumentProps {
   project: BookProject;
+  preparedChapters?: GroupedChapter[] | null;
+  pageRange?: { start?: number; end?: number };
 }
 
-export const PrintDocument: React.FC<PrintDocumentProps> = ({ project }) => {
-  if (!project || !Array.isArray(project.chunks) || project.chunks.length === 0) {
-    return null;
-  }
+function escapeCssContent(value: string): string {
+  return (value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\r?\n/g, ' ').trim();
+}
 
-  const design = project.designConfig || DEFAULT_DESIGN_CONFIG;
-  const chapters = useMemo(
-    () => groupChunksIntoChapters(project.chunks, design.excludedChunkIds),
-    [project.chunks, design.excludedChunkIds]
-  );
+export const PrintDocument: React.FC<PrintDocumentProps> = ({
+  project,
+  preparedChapters,
+  pageRange,
+}) => {
+  const design = project?.designConfig || DEFAULT_DESIGN_CONFIG;
+
+  const chapters = useMemo(() => {
+    if (Array.isArray(preparedChapters) && preparedChapters.length > 0) {
+      return preparedChapters;
+    }
+    if (!project || !Array.isArray(project.chunks) || project.chunks.length === 0) {
+      return [];
+    }
+    return groupChunksIntoChapters(project.chunks, design.excludedChunkIds, pageRange);
+  }, [preparedChapters, project, design.excludedChunkIds, pageRange]);
+
   const defaultThemeFallback = BOOK_THEMES.spiritual || {
     id: 'spiritual',
     name: 'معنوی و عرفانی',
@@ -59,6 +72,10 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({ project }) => {
     }
   }, [pageBgColor]);
 
+  if (!project || chapters.length === 0) {
+    return null;
+  }
+
   const fontSizeClass =
     design.fontSize === 'small'
       ? 'text-[11pt]'
@@ -76,49 +93,87 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({ project }) => {
   const fontFamily = design.fontFamily || 'Vazirmatn Medium';
 
   const showRunningHeader = design.showHeader && Boolean(design.headerText?.trim());
-  const showRunningFooter = design.showFooter && (Boolean(design.footerText?.trim()) || design.showPageNumbers);
+  const showRunningFooter = design.showFooter && (Boolean(design.footerText?.trim()) || design.showPageNumbers !== false);
+  const showPageNumbers = design.showPageNumbers !== false;
 
-  // Top spacing calculations:
-  // When running header is enabled: breathing room between header rule and chapter text
-  // When running header is OFF: dedicated publishing top margin on every printed page (prevents text touching paper edge!)
-  const headerGap =
+  const topMarginMm =
     design.topMargin === 'compact'
-      ? '8mm'
+      ? 12
       : design.topMargin === 'generous'
-      ? '16mm'
+      ? 22
       : design.topMargin === 'extra_generous'
-      ? '22mm'
-      : '12mm';
+      ? 28
+      : 16;
 
-  const noHeaderTopSpacer =
-    design.topMargin === 'compact'
-      ? '16mm'
-      : design.topMargin === 'generous'
-      ? '30mm'
-      : design.topMargin === 'extra_generous'
-      ? '40mm'
-      : '22mm';
+  const bottomMarginMm = showRunningFooter || showPageNumbers ? 16 : 14;
 
-  // Dedicated physical margins in millimeters for book publishing.
-  // Persian RTL books require a safe right margin (outer/binding margin) of at least 20-22mm
-  // to ensure characters never clip off the page edge on any printer or PDF renderer.
   const horizontalMarginMm =
     design.pageMargin === 'compact'
-      ? 16 // 16mm safe compact margin
+      ? 16
       : design.pageMargin === 'generous'
-      ? 28 // 28mm generous luxury margin
-      : 22; // 22mm standard book publishing margin (default)
+      ? 28
+      : 22;
 
   const horizontalPaddingStyle = `${horizontalMarginMm}mm`;
-
   const paragraphSpacingClass = `p-spacing-${design.paragraphSpacing || 'normal'}`;
-
   const isJustified = design.textAlignment === 'both';
   const textAlignClass = isJustified ? 'text-justify book-align-both' : 'text-right book-align-right';
 
+  const totalSectionsCount = chapters.reduce(
+    (sum, ch) => sum + (Array.isArray(ch.sections) && ch.sections.length > 0 ? ch.sections.length : 1),
+    0
+  );
+  const isLargeBook = totalSectionsCount > 80;
+
+  const headerLabel = showRunningHeader
+    ? escapeCssContent(
+        `${design.headerText?.trim() || project.title}${design.websiteUrl ? ` • ${design.websiteUrl}` : ''}`
+      )
+    : '';
+  const footerLabel = showRunningFooter
+    ? escapeCssContent(
+        `${design.footerText?.trim() || 'سامانه ترجمه و نشر کتاب'}${design.brandName ? ` • ${design.brandName}` : ''}`
+      )
+    : '';
+
+  const dynamicPageCss = `
+    @page {
+      size: A4 portrait;
+      margin: ${topMarginMm}mm 0mm ${bottomMarginMm}mm 0mm !important;
+      background: ${pageBgColor};
+      @top-left { content: none !important; }
+      @top-right { content: none !important; }
+      @bottom-left { content: none !important; }
+      @bottom-right { content: none !important; }
+      @top-center {
+        ${
+          showRunningHeader && headerLabel
+            ? `content: "${headerLabel}"; font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${headerColor}; vertical-align: bottom; padding-bottom: 4mm;`
+            : 'content: none !important;'
+        }
+      }
+      @bottom-center {
+        ${
+          showRunningFooter && showPageNumbers
+            ? `content: "${footerLabel}  •  صفحه " counter(page); font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 4mm;`
+            : showRunningFooter
+            ? `content: "${footerLabel}"; font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 4mm;`
+            : showPageNumbers
+            ? `content: "صفحه " counter(page); font-family: '${fontFamily}', 'Vazirmatn', Tahoma, sans-serif; font-size: 8.5pt; color: ${footerColor}; vertical-align: top; padding-top: 4mm;`
+            : 'content: none !important;'
+        }
+      }
+    }
+    @page :first {
+      margin-top: 10mm !important;
+      @top-center { content: none !important; }
+      @bottom-center { content: none !important; }
+    }
+  `;
+
   return (
     <div
-      className="print-only hidden min-h-screen text-right relative"
+      className="print-only hidden min-h-screen text-right relative print-doc-root"
       style={{
         backgroundColor: pageBgColor,
         color: textColor,
@@ -133,8 +188,10 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({ project }) => {
         ['--theme-text-color' as any]: textColor,
       }}
     >
-      {/* Optional Watermark Text across printed pages */}
-      {design.watermarkText?.trim() && (
+      <style dangerouslySetInnerHTML={{ __html: dynamicPageCss }} />
+
+      {/* Optional Watermark Text (disabled on huge >120-section books to avoid Skia layer OOM) */}
+      {design.watermarkText?.trim() && totalSectionsCount <= 120 && (
         <div className="fixed inset-0 pointer-events-none flex items-center justify-center select-none z-0 overflow-hidden opacity-[0.06]">
           <div
             className="transform -rotate-45 text-5xl sm:text-7xl font-bold tracking-widest whitespace-nowrap"
@@ -145,8 +202,8 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({ project }) => {
         </div>
       )}
 
-      {/* Subtle Spiritual / Arabesque Motif Background for Print */}
-      {design.backgroundPattern === 'arabesque' && (
+      {/* Subtle SVG Patterns (only for normal-sized books; skipped on large >80-section books to prevent Chromium print hang) */}
+      {!isLargeBook && design.backgroundPattern === 'arabesque' && (
         <div className="fixed inset-0 pointer-events-none opacity-[0.04] z-0 flex items-center justify-center">
           <svg width="600" height="600" viewBox="0 0 100 100" fill="none" stroke="currentColor" strokeWidth="0.5">
             <circle cx="50" cy="50" r="45" />
@@ -158,7 +215,7 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({ project }) => {
         </div>
       )}
 
-      {design.backgroundPattern === 'geometry' && (
+      {!isLargeBook && design.backgroundPattern === 'geometry' && (
         <div className="fixed inset-0 pointer-events-none opacity-[0.04] z-0 flex items-center justify-center">
           <svg width="600" height="600" viewBox="0 0 100 100" fill="none" stroke="currentColor" strokeWidth="0.4">
             <rect x="15" y="15" width="70" height="70" transform="rotate(45 50 50)" />
@@ -169,272 +226,192 @@ export const PrintDocument: React.FC<PrintDocumentProps> = ({ project }) => {
         </div>
       )}
 
-      {/* Running Header & Footer are managed via CSS print table structure so they repeat gracefully and never overlap content */}
-      <table className="w-full border-collapse print-doc-table">
-        <thead className="print-table-header">
-          {showRunningHeader ? (
-            <tr>
-              <th className="font-normal text-right p-0 border-0">
-                <div
-                  className="h-12 flex items-center justify-between text-[9pt] border-b"
-                  style={{
-                    paddingLeft: horizontalPaddingStyle,
-                    paddingRight: horizontalPaddingStyle,
-                    backgroundColor: pageBgColor,
-                    color: headerColor,
-                    borderColor,
-                    boxSizing: 'border-box',
-                    width: '100%',
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold">{design.headerText || project.title}</span>
-                    {design.websiteUrl && (
-                      <span className="opacity-70 text-[8pt] font-mono" dir="ltr">
-                        • {design.websiteUrl}
-                      </span>
-                    )}
-                  </div>
-                  <span className="text-[8.5pt] opacity-75 font-medium">
-                    {project.title}
-                  </span>
-                </div>
-                {/* Generous breathing space between running header and book text */}
-                <div style={{ height: headerGap }} />
-              </th>
-            </tr>
-          ) : (
-            /* When no running header is active, enforce standard publishing top margin on EVERY printed page! */
-            <tr>
-              <th className="font-normal text-right p-0 border-0">
-                <div style={{ height: noHeaderTopSpacer }} />
-              </th>
-            </tr>
-          )}
-        </thead>
+      {/* Block-level flow container (avoids monolithic <table> LayoutNG freeze on 100-500+ page books) */}
+      <div
+        className="book-page-content-wrapper"
+        style={{
+          paddingLeft: horizontalPaddingStyle,
+          paddingRight: horizontalPaddingStyle,
+          paddingTop: '2mm',
+          paddingBottom: '6mm',
+          width: '100%',
+          maxWidth: '100%',
+          boxSizing: 'border-box',
+          direction: 'rtl',
+        }}
+      >
+        {/* Cover Page / Title Page */}
+        {design.showCoverPage !== false &&
+          (() => {
+            const cover = design.coverPage || {};
+            const coverLayout = cover.layout || 'center';
+            const isRightAlign = coverLayout === 'right' || coverLayout === 'right_aligned';
+            const isFramed = coverLayout === 'frame' || coverLayout === 'framed_spiritual';
 
-        <tfoot className="print-table-footer">
-          {showRunningFooter ? (
-            <tr>
-              <td className="p-0 border-0">
-                {/* Breathing space between book text and footer */}
-                <div style={{ height: '8mm' }} />
-                <div
-                  className="h-12 flex items-center justify-between text-[9pt] border-t"
-                  style={{
-                    paddingLeft: horizontalPaddingStyle,
-                    paddingRight: horizontalPaddingStyle,
-                    backgroundColor: pageBgColor,
-                    color: footerColor,
-                    borderColor,
-                    boxSizing: 'border-box',
-                    width: '100%',
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <span>{design.footerText || 'سامانه هوشمند ترجمه و چاپ کتاب'}</span>
-                    {design.brandName && (
-                      <span className="opacity-70 font-semibold">• {design.brandName}</span>
-                    )}
-                  </div>
-                  {design.showPageNumbers && (
-                    <span className="font-bold font-mono text-[8.5pt]">
-                      صفحه چاپی
-                    </span>
-                  )}
-                </div>
-              </td>
-            </tr>
-          ) : (
-            /* Bottom breathing margin on every printed page */
-            <tr>
-              <td className="p-0 border-0">
-                <div style={{ height: '16mm' }} />
-              </td>
-            </tr>
-          )}
-        </tfoot>
+            const coverTitle = cover.title || project.title || project.originalTitle || 'کتاب بدون عنوان';
+            const coverSubtitle = cover.subtitle !== undefined ? cover.subtitle : project.originalTitle;
+            const coverAuthor = cover.author !== undefined ? cover.author : project.author;
+            const coverTranslator = cover.translator !== undefined ? cover.translator : project.translator;
+            const coverPublisher = cover.publisher !== undefined ? cover.publisher : design.brandName;
+            const coverNote = cover.note || cover.editionYear;
 
-        <tbody className="print-table-body">
-          <tr>
-            <td className="p-0 border-0 align-top">
+            const titleSizePt = cover.titleSize || 32;
+            const subtitleSizePt = cover.subtitleSize || 16;
+            const authorSizePt = cover.authorSize || 13;
+
+            const titleColor = cover.titleColor || heading1Color || theme.headingColor;
+            const subtitleColor = cover.subtitleColor || theme.accentColor || '#b45309';
+            const authorColor = cover.authorColor || textColor;
+            const showMotif = cover.showMotif ?? true;
+            const showDivider = cover.showDivider ?? true;
+
+            return (
               <div
-                className="book-page-content-wrapper"
+                className={`book-cover-page min-h-[85vh] flex flex-col py-16 my-auto ${
+                  isRightAlign ? 'items-start text-right' : 'items-center justify-center text-center'
+                } ${isFramed ? 'p-10 border-4 border-double rounded-3xl m-4' : ''}`}
                 style={{
-                  paddingLeft: horizontalPaddingStyle,
-                  paddingRight: horizontalPaddingStyle,
-                  paddingTop: '4mm',
-                  paddingBottom: '8mm',
-                  width: '100%',
-                  maxWidth: '100%',
-                  boxSizing: 'border-box',
-                  direction: 'rtl',
+                  backgroundColor: cover.bgColor || undefined,
+                  borderColor: cover.borderColor || borderColor,
+                  pageBreakAfter: 'always',
+                  breakAfter: 'page',
                 }}
               >
-              {/* Cover Page / Title Page (Fully customizable by user) */}
-              {design.showCoverPage && (() => {
-                const cover = design.coverPage || {};
-                const coverLayout = cover.layout || 'center';
-                const isRightAlign = coverLayout === 'right';
-                const isFramed = coverLayout === 'frame';
-
-                const coverTitle = cover.title || project.title || project.originalTitle || 'کتاب بدون عنوان';
-                const coverSubtitle = cover.subtitle !== undefined ? cover.subtitle : project.originalTitle;
-                const coverAuthor = cover.author !== undefined ? cover.author : project.author;
-                const coverTranslator = cover.translator !== undefined ? cover.translator : project.translator;
-                const coverPublisher = cover.publisher !== undefined ? cover.publisher : design.brandName;
-                const coverNote = cover.note || cover.editionYear;
-
-                const titleSizePt = cover.titleSize || 32;
-                const subtitleSizePt = cover.subtitleSize || 16;
-                const authorSizePt = cover.authorSize || 13;
-
-                const titleColor = cover.titleColor || heading1Color || theme.headingColor;
-                const subtitleColor = cover.subtitleColor || theme.accentColor || '#b45309';
-                const authorColor = cover.authorColor || textColor;
-                const showMotif = cover.showMotif ?? true;
-                const showDivider = cover.showDivider ?? true;
-
-                return (
+                {showMotif && (
                   <div
-                    className={`book-chapter-break min-h-[85vh] flex flex-col py-16 my-auto ${
-                      isRightAlign ? 'items-start text-right' : 'items-center justify-center text-center'
-                    } ${isFramed ? 'p-10 border-4 border-double rounded-3xl m-4' : ''}`}
+                    className="text-3xl font-serif mb-6 opacity-85 select-none"
+                    style={{ color: accentColor }}
+                  >
+                    {theme.dividerSymbol || '❦ ✤ ❦'}
+                  </div>
+                )}
+
+                <h1
+                  className="font-extrabold mb-3 tracking-tight leading-snug max-w-3xl"
+                  style={{
+                    fontSize: `${titleSizePt}pt`,
+                    color: titleColor,
+                    textAlign: isRightAlign ? 'right' : 'center',
+                  }}
+                >
+                  {coverTitle}
+                </h1>
+
+                {coverSubtitle && (
+                  <h2
+                    className="font-normal opacity-80 mb-5 font-serif"
+                    dir="auto"
                     style={{
-                      backgroundColor: cover.bgColor || undefined,
-                      borderColor: cover.borderColor || borderColor,
+                      fontSize: `${subtitleSizePt}pt`,
+                      color: subtitleColor,
+                      textAlign: isRightAlign ? 'right' : 'center',
                     }}
                   >
-                    {/* Top Ornamental Frame / Motif */}
-                    {showMotif && (
-                      <div
-                        className="text-3xl font-serif mb-6 opacity-85 select-none"
-                        style={{ color: accentColor }}
-                      >
-                        {theme.dividerSymbol || '❦ ✤ ❦'}
-                      </div>
-                    )}
+                    {coverSubtitle}
+                  </h2>
+                )}
 
-                    {/* Book Main Title */}
-                    <h1
-                      className="font-extrabold mb-3 tracking-tight leading-snug max-w-3xl"
-                      style={{
-                        fontSize: `${titleSizePt}pt`,
-                        color: titleColor,
-                        textAlign: isRightAlign ? 'right' : 'center',
-                      }}
-                    >
-                      {coverTitle}
-                    </h1>
+                {showDivider && (
+                  <div
+                    className={`h-1.5 rounded-full my-6 opacity-80 ${isRightAlign ? 'w-48 ml-auto mr-0' : 'w-36 mx-auto'}`}
+                    style={{ backgroundColor: accentColor }}
+                  />
+                )}
 
-                    {/* Book Subtitle / Original Title */}
-                    {coverSubtitle && (
-                      <h2
-                        className="font-normal opacity-80 mb-5 font-serif"
-                        dir="auto"
-                        style={{
-                          fontSize: `${subtitleSizePt}pt`,
-                          color: subtitleColor,
-                          textAlign: isRightAlign ? 'right' : 'center',
-                        }}
-                      >
-                        {coverSubtitle}
-                      </h2>
-                    )}
+                <div
+                  className="space-y-3 font-medium opacity-90 my-8 leading-relaxed"
+                  style={{
+                    fontSize: `${authorSizePt}pt`,
+                    color: authorColor,
+                    textAlign: isRightAlign ? 'right' : 'center',
+                  }}
+                >
+                  {coverAuthor && (
+                    <p>
+                      نویسنده: <strong style={{ color: titleColor }}>{coverAuthor}</strong>
+                    </p>
+                  )}
+                  {coverTranslator && (
+                    <p>
+                      ترجمه و ویرایش: <strong>{coverTranslator}</strong>
+                    </p>
+                  )}
+                  {coverPublisher && (
+                    <p className="opacity-85 pt-1">
+                      انتشارات / ناشر: <strong>{coverPublisher}</strong>
+                    </p>
+                  )}
+                  {design.websiteUrl && (
+                    <p className="opacity-80 font-mono tracking-wider pt-0.5 text-[10pt]" dir="ltr">
+                      {design.websiteUrl}
+                    </p>
+                  )}
+                  {coverNote && (
+                    <p className="text-[10pt] opacity-75 pt-2 border-t border-slate-300/40 max-w-md mx-auto">
+                      {coverNote}
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
 
-                    {/* Decorative Divider */}
-                    {showDivider && (
-                      <div
-                        className={`h-1.5 rounded-full my-6 opacity-80 ${isRightAlign ? 'w-48 ml-auto mr-0' : 'w-36 mx-auto'}`}
-                        style={{ backgroundColor: accentColor }}
-                      />
-                    )}
+        {/* Chapters & Incremental Chunk Sections (zero mega-string innerHTML nodes) */}
+        <div className="space-y-8">
+          {chapters.map((chapter, idx, allChapters) => {
+            const sections =
+              Array.isArray(chapter.sections) && chapter.sections.length > 0
+                ? chapter.sections
+                : chapter.htmlContent
+                ? [{ id: chapter.chapterKey, html: chapter.htmlContent }]
+                : [];
 
-                    {/* Metadata: Author, Translator, Publisher, Edition */}
-                    <div
-                      className="space-y-3 font-medium opacity-90 my-8 leading-relaxed"
-                      style={{
-                        fontSize: `${authorSizePt}pt`,
-                        color: authorColor,
-                        textAlign: isRightAlign ? 'right' : 'center',
-                      }}
-                    >
-                      {coverAuthor && (
-                        <p>
-                          نویسنده: <strong style={{ color: titleColor }}>{coverAuthor}</strong>
-                        </p>
-                      )}
-                      {coverTranslator && (
-                        <p>
-                          ترجمه و ویرایش: <strong>{coverTranslator}</strong>
-                        </p>
-                      )}
-                      {coverPublisher && (
-                        <p className="opacity-85 pt-1">
-                          انتشارات / ناشر: <strong>{coverPublisher}</strong>
-                        </p>
-                      )}
-                      {design.websiteUrl && (
-                        <p className="opacity-80 font-mono tracking-wider pt-0.5 text-[10pt]" dir="ltr">
-                          {design.websiteUrl}
-                        </p>
-                      )}
-                      {coverNote && (
-                        <p className="text-[10pt] opacity-75 pt-2 border-t border-slate-300/40 max-w-md mx-auto">
-                          {coverNote}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })()}
-
-        {/* Chapters Content */}
-        <div className="space-y-12">
-          {chapters.map((chapter, idx, allChapters) => (
-            <div
-              key={chapter.chapterKey}
-              className={`book-chapter-break ${design.continuousFlow === false ? 'force-page-break' : ''} pt-6 ${
-                design.borderStyle === 'ornate_spiritual'
-                  ? 'p-6 rounded-2xl border-2 border-double my-6'
-                  : design.borderStyle === 'double_classic'
-                  ? 'p-6 rounded-xl border-4 border-double my-6'
-                  : design.borderStyle === 'thin_modern'
-                  ? 'p-6 rounded-xl border my-6'
-                  : ''
-              }`}
-              style={{
-                lineHeight: lineSpacingStyle,
-                borderColor,
-              }}
-            >
-              {/* Continuous Chapter Body with Preserved Colors, Subheadings & Spaced Paragraphs */}
+            return (
               <div
-                className={`book-render-content ${fontSizeClass} ${paragraphSpacingClass} ${textAlignClass}`}
+                key={`${chapter.chapterKey}_${idx}`}
+                className={`book-chapter-break ${design.continuousFlow === false && idx > 0 ? 'force-page-break' : ''} pt-4 ${
+                  design.borderStyle === 'ornate_spiritual'
+                    ? 'p-6 rounded-2xl border-2 border-double my-4'
+                    : design.borderStyle === 'double_classic'
+                    ? 'p-6 rounded-xl border-4 border-double my-4'
+                    : design.borderStyle === 'thin_modern'
+                    ? 'p-6 rounded-xl border my-4'
+                    : ''
+                }`}
                 style={{
                   lineHeight: lineSpacingStyle,
-                  textAlign: isJustified ? 'justify' : 'right',
+                  borderColor,
                 }}
-                dangerouslySetInnerHTML={{ __html: chapter.htmlContent }}
-              />
-
-              {/* Section Separator */}
-              {idx < allChapters.length - 1 && (
+              >
                 <div
-                  className="text-center my-10 text-sm opacity-60"
-                  style={{ color: accentColor }}
+                  className={`book-render-content ${fontSizeClass} ${paragraphSpacingClass} ${textAlignClass}`}
+                  style={{
+                    lineHeight: lineSpacingStyle,
+                    textAlign: isJustified ? 'justify' : 'right',
+                  }}
                 >
-                  {theme.dividerSymbol}
+                  {sections.map(sec => (
+                    <div
+                      key={sec.id}
+                      className="book-render-section"
+                      dangerouslySetInnerHTML={{ __html: sec.html }}
+                    />
+                  ))}
                 </div>
-              )}
-            </div>
-          ))}
-        </div>
+
+                {idx < allChapters.length - 1 && (
+                  <div
+                    className="text-center my-8 text-sm opacity-60"
+                    style={{ color: accentColor }}
+                  >
+                    {theme.dividerSymbol}
+                  </div>
+                )}
               </div>
-            </td>
-          </tr>
-        </tbody>
-</table>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 };
